@@ -531,6 +531,9 @@ class HDXConverter:
 
     def _process_single_html_file(self, html_file: Path):
         """Обработка одного HTML файла - НОВАЯ ВЕРСИЯ СО STRUCTURED_DATA"""
+        # === ИСПРАВЛЕНИЕ: Добавлено INFO логирование ===
+        self.logger.info(f"Начало обработки файла {html_file.name}")
+        # === КОНЕЦ ИСПРАВЛЕНИЯ ===
         self.logger.debug(f"=== НАЧАЛО ОБРАБОТКИ ФАЙЛА {html_file.name} ===")
 
         with open(html_file, 'r', encoding='utf-8') as f:
@@ -601,6 +604,9 @@ class HDXConverter:
             if result:
                 self.stats_collector.increment_stat("txt_files_created")
                 self.stats_collector.increment_stat("total_files_created")
+                # === ИСПРАВЛЕНИЕ: Добавлено INFO логирование ===
+                self.logger.info(f"Создан TXT файл: {result.name}")
+                # === КОНЕЦ ИСПРАВЛЕНИЯ ===
                 self.logger.debug(f"Создан TXT файл: {result}")
             else:
                 self.logger.error(f"Ошибка создания TXT файла для {html_file.name}")
@@ -616,6 +622,9 @@ class HDXConverter:
             if result:
                 self.stats_collector.increment_stat("md_files_created")
                 self.stats_collector.increment_stat("total_files_created")
+                # === ИСПРАВЛЕНИЕ: Добавлено INFO логирование ===
+                self.logger.info(f"Создан MD файл: {result.name}")
+                # === КОНЕЦ ИСПРАВЛЕНИЯ ===
                 self.logger.debug(f"Создан MD файл: {result}")
             else:
                 self.logger.error(f"Ошибка создания MD файла для {html_file.name}")
@@ -630,6 +639,9 @@ class HDXConverter:
         self.stats_collector.increment_stat("tables_processed", table_count)
 
         self.logger.debug(f"=== УСПЕШНО ОБРАБОТАН {html_file.name} ===")
+        # === ИСПРАВЛЕНИЕ: Добавлено INFO логирование ===
+        self.logger.info(f"Завершена обработка файла {html_file.name}")
+        # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
     def _analyze_content_flags(self, content: str) -> Dict[str, bool]:
         """Анализ флагов содержания"""
@@ -830,10 +842,12 @@ class HDXConverter:
     Articles with warnings: {val_stats['articles_with_warnings']}
     ============================
     """
-        # Выводим статистику только print'ом, не через логгер
+        # === ИСПРАВЛЕНИЕ: Статистика всегда выводится в консоль print'ом ===
+        # Выводим статистику только print'ом, не через логгер (чтобы видеть во всех режимах)
         print(stats_message)
         # Логируем статистику в файл с debug уровнем
-        self.logger.debug(stats_message.strip())
+        self.logger.info(stats_message.strip())
+        # === КОНЕЦ ИСПРАВЛЕНИЯ ===
     
     def _print_skipped_files_warnings(self):
         """Вывод предупреждений о пропущенных файлах"""
@@ -1054,10 +1068,11 @@ class HDXConverter:
                 json.dump(structured_data, f, ensure_ascii=False, indent=2)
 
             self.stats_collector.increment_stat("json_data_files_created")
-            # === ИСПРАВЛЕНИЕ: Увеличиваем total_files_created для JSON data ===
             self.stats_collector.increment_stat("total_files_created")
-            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
+            # === ИСПРАВЛЕНИЕ: Добавлено INFO логирование ===
+            self.logger.info(f"Создан JSON data файл: {output_path.name}")
+            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
             self.logger.debug(f"Создан JSON data файл: {output_path}")
 
             return output_path

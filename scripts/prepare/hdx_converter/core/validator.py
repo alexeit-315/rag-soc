@@ -49,10 +49,16 @@ class MetadataValidator:
         if all_missing_mandatory:
             validation.missing_fields.mandatory = all_missing_mandatory
             logger.debug(f"Установлено validation.missing_fields.mandatory: {all_missing_mandatory}")
+            # === ИСПРАВЛЕНИЕ: Логирование ошибок валидации на уровне ERROR ===
+            logger.error(f"Статья '{metadata.article.get('title', 'Unknown')}' невалидна: отсутствуют обязательные поля: {', '.join(all_missing_mandatory)}")
+            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         if missing_recommended:
             validation.missing_fields.recommended = missing_recommended
             logger.debug(f"Установлено validation.missing_fields.recommended: {missing_recommended}")
+            # === ИСПРАВЛЕНИЕ: Логирование предупреждений на уровне WARNING ===
+            logger.warning(f"Статья '{metadata.article.get('title', 'Unknown')}' имеет предупреждения: отсутствуют рекомендуемые поля: {', '.join(missing_recommended)}")
+            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         if missing_optional:
             validation.missing_fields.optional = missing_optional
@@ -73,6 +79,9 @@ class MetadataValidator:
         if hierarchy and len(hierarchy) == 1 and hierarchy[0].get("dc_identifier") == "ORPHAN_ARTICLE":
             validation.warnings.append("Article has no parent in navigation hierarchy (orphan article)")
             logger.debug(f"Добавлено предупреждение: сиротская статья")
+            # === ИСПРАВЛЕНИЕ: Предупреждение для -v1 ===
+            logger.warning(f"Статья '{metadata.article.get('title', 'Unknown')}' является сиротской (нет родителя в иерархии)")
+            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         # Предупреждения для отсутствующих рекомендуемых полей
         if missing_recommended:

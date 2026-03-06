@@ -1,0 +1,13 @@
+# Основные зависимости для HDX Converter
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0  # Добавлено! Нужно для BaseSettings
+tqdm>=4.65.0
+markdown>=3.4.0
+html2text>=2020.1.16
+pathlib>=1.0.1
+
+# Дополнительные зависимости, которые могут понадобиться
+colorama>=0.4.6  # для цветного вывода
+typing-extensions>=4.0.0  # для типов

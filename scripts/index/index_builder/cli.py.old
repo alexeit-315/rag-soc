@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Command line interface for index builder
+Supports both container and console execution
+"""
+
+import argparse
+from pathlib import Path
+import sys
+import os
+from typing import Optional
+
+
+def get_env_path(env_var: str, default: str) -> str:
+    """Получает путь из переменной окружения, проверяя его существование"""
+    value = os.environ.get(env_var, default)
+
+    # В контейнерной среде пути могут быть смонтированы
+    if os.path.exists(value) or os.path.exists(os.path.dirname(value)):
+        return value
+
+    # Если путь не существует, но это контейнер (проверяем по /.dockerenv)
+    if os.path.exists('/.dockerenv'):
+        # В контейнере создаем директорию если нужно
+        Path(value).mkdir(parents=True, exist_ok=True)
+        return value
+
+    return value
+
+
+def detect_environment() -> str:
+    """Определяет среду выполнения: container или console"""
+    # Проверка на Docker контейнер
+    if os.path.exists('/.dockerenv'):
+        return 'container'
+
+    # Проверка на наличие специфичных для контейнера переменных
+    if os.environ.get('KUBERNETES_SERVICE_HOST') or os.environ.get('CONTAINER'):
+        return 'container'
+
+    # По умолчанию - консоль
+    return 'console'
+
+
+def setup_container_paths(args) -> argparse.Namespace:
+    """Настраивает пути для контейнерной среды"""
+
+    # Принудительно создаем директории если их нет
+    Path(args.source_folder).mkdir(parents=True, exist_ok=True)
+    if args.meta_folder:
+        Path(args.meta_folder).mkdir(parents=True, exist_ok=True)
+    Path(args.persist_dir).mkdir(parents=True, exist_ok=True)
+
+    if args.model_path:
+        Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
+
+    if args.log_dir:
+        Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+
+    return args
+
+
+def main():
+    # Определяем среду выполнения
+    environment = detect_environment()
+
+    parser = argparse.ArgumentParser(
+        description='Build vector index from JSON documentation files',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Environment: {environment}
+Supports both container and console execution.
+
+Two folders structure:
+  --source-folder  : JSON files with article CONTENT (from json_data/)
+  --meta-folder    : JSON files with article METADATA (from meta_data/)
+
+Environment variables (for container):
+  SOURCE_JSON_FOLDER  - source folder with JSON content files (default: ./json_data)
+  META_JSON_FOLDER    - folder with JSON metadata files (default: ./meta_data)
+  PERSIST_DIR         - folder for vector index (default: ./vector_index)
+  MODEL_PATH          - path to local embedding model (default: ./models/all-MiniLM-L12-v2)
+  LOG_DIR             - directory for log files (default: ./logs)
+  CONTAINER           - set to "1" to force container mode
+
+Examples (console):
+  python -m index_builder.cli --source-folder ./hdx_output/json_data --meta-folder ./hdx_output/meta_data --persist-dir ./vector_index
+  python -m index_builder.cli --source-folder ./json_content --meta-folder ./json_metadata --chunk-by-structure
+
+Examples (container):
+  docker run -v /host/data/json:/data/json:ro -v /host/data/meta:/data/meta:ro index-builder --source-folder /data/json --meta-folder /data/meta
+        """
+    )
+
+    # Основные аргументы с поддержкой переменных окружения
+    parser.add_argument('--source-folder', type=str,
+                       default=get_env_path('SOURCE_JSON_FOLDER', './json_data'),
+                       help='Folder with JSON content files (from json_data/) - can be set via SOURCE_JSON_FOLDER env')
+
+    parser.add_argument('--meta-folder', type=str,
+                       default=get_env_path('META_JSON_FOLDER', './meta_data'),
+                       help='Folder with JSON metadata files (from meta_data/) - can be set via META_JSON_FOLDER env')
+
+    parser.add_argument('--persist-dir', type=str,
+                       default=get_env_path('PERSIST_DIR', './vector_index'),
+                       help='Folder where vector DB will be stored (can be set via PERSIST_DIR env)')
+
+    # Настройки модели
+    parser.add_argument('--model-path', type=str,
+                       default=get_env_path('MODEL_PATH', './models/all-MiniLM-L12-v2'),
+                       help='Path to local embedding model (can be set via MODEL_PATH env)')
+
+    parser.add_argument('--model-name', type=str,
+                       help='Remote embedding model name (optional)')
+
+    # Настройки чанкования
+    parser.add_argument('--chunk-size', type=int, default=900,
+                       help='Chunk size for size-based chunking')
+
+    parser.add_argument('--chunk-overlap', type=int, default=150,
+                       help='Chunk overlap for size-based chunking')
+
+    parser.add_argument('--chunk-by-structure', action='store_true',
+                       help='Use structure-based chunking (by JSON sections) instead of size-based')
+
+    # Настройки логирования
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument('-v0', '--silent', action='store_true',
+                          help='Silent mode - only errors')
+    log_group.add_argument('-v1', '--short', action='store_true',
+                          help='Short mode - warnings and errors')
+    log_group.add_argument('-v2', '--normal', action='store_true',
+                          help='Normal mode (default) - info and above')
+    log_group.add_argument('-v3', '--debug', action='store_true',
+                          help='Debug mode - debug and above')
+
+    parser.add_argument('--log-dir', type=str,
+                       default=get_env_path('LOG_DIR', './logs'),
+                       help='Directory for log files (can be set via LOG_DIR env)')
+
+    # Специфичные для контейнера аргументы
+    if environment == 'container' or os.environ.get('CONTAINER'):
+        parser.add_argument('--no-path-check', action='store_true',
+                           help='Skip path existence checks (for container with mounted volumes)')
+
+    args = parser.parse_args()
+
+    # Если в контейнере, настраиваем пути
+    if environment == 'container' or os.environ.get('CONTAINER'):
+        args = setup_container_paths(args)
+        print(f"🐳 Running in container mode", file=sys.stderr)
+    else:
+        print(f"💻 Running in console mode", file=sys.stderr)
+
+        # В консольном режиме проверяем существование путей
+        if not os.path.exists(args.source_folder):
+            print(f"Warning: Source folder '{args.source_folder}' does not exist", file=sys.stderr)
+            response = input("Create it? (y/n): ")
+            if response.lower() == 'y':
+                Path(args.source_folder).mkdir(parents=True, exist_ok=True)
+            else:
+                print("Exiting...")
+                sys.exit(1)
+
+        if args.meta_folder and not os.path.exists(args.meta_folder):
+            print(f"Warning: Meta folder '{args.meta_folder}' does not exist", file=sys.stderr)
+            response = input("Create it? (y/n): ")
+            if response.lower() == 'y':
+                Path(args.meta_folder).mkdir(parents=True, exist_ok=True)
+            else:
+                print("Exiting...")
+                sys.exit(1)
+
+    # Определяем уровень логирования
+    verbose_level = 2  # normal по умолчанию
+    if args.silent:
+        verbose_level = 0
+    elif args.short:
+        verbose_level = 1
+    elif args.normal:
+        verbose_level = 2
+    elif args.debug:
+        verbose_level = 3
+
+    # Импортируем здесь, чтобы избежать циклических зависимостей
+    from .utils.logger import IndexBuilderLogger
+    from .core.index_builder import IndexBuilder
+
+    # Настраиваем логирование
+    log_dir = Path(args.log_dir) if args.log_dir else None
+    logger = IndexBuilderLogger.setup_logging(verbose_level, log_dir)
+
+    logger.info(f"Environment: {environment}")
+    logger.info("🚀 Starting index builder")
+    logger.info(f"Source folder (content): {args.source_folder}")
+    logger.info(f"Meta folder (metadata): {args.meta_folder}")
+    logger.info(f"Persist dir: {args.persist_dir}")
+    logger.info(f"Chunk by structure: {args.chunk_by_structure}")
+
+    if args.model_name:
+        logger.info(f"Model name: {args.model_name}")
+    else:
+        logger.info(f"Model path: {args.model_path}")
+
+    # Проверяем доступность путей в контейнере
+    if environment == 'container':
+        for folder in [args.source_folder, args.meta_folder, args.persist_dir]:
+            if folder:
+                try:
+                    test_file = Path(folder) / '.write_test'
+                    test_file.touch()
+                    test_file.unlink()
+                    logger.info(f"✅ Folder is writable: {folder}")
+                except Exception as e:
+                    if folder == args.persist_dir:
+                        logger.warning(f"⚠️ Persist dir may not be writable: {e}")
+                        logger.warning("Check volume mounts in container")
+
+    # Создаем билдер
+    builder = IndexBuilder(
+        source_folder=Path(args.source_folder),
+        meta_folder=Path(args.meta_folder) if args.meta_folder else None,
+        persist_dir=Path(args.persist_dir),
+        model_path=args.model_path,
+        model_name=args.model_name,
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
+        chunk_by_structure=args.chunk_by_structure,
+        logger=logger
+    )
+
+    # Запускаем построение индекса
+    try:
+        success = builder.build_index()
+        if success:
+            logger.info("✅ Index building completed successfully")
+            sys.exit(0)
+        else:
+            logger.error("❌ Index building failed")
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error during index building: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+models/
+scripts/.prompts/
+scripts/index/logs/
+scripts/index/old/
+scripts/index/vector_index_gpu/
+scripts/index/venv_index/
+scripts/prepare/venv_prepare/
+source/
+tests/
