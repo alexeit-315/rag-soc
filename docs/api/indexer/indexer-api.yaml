@@ -1,0 +1,1675 @@
+openapi: 3.0.3
+info:
+  title: Indexer Service API
+  description: |
+    Сервис индексации документов технической документации для RAG-платформы.
+    
+    **Назначение:**
+    - Индексация документов из JSON (результат работы Converter)
+    - Разбиение на чанки (chunking) с настраиваемыми стратегиями
+    - Обогащение метаданных чанков
+    - Вызов Embedding Service для генерации эмбеддингов
+    - Сохранение результатов в Vector DB (Qdrant) и Elasticsearch
+    - Управление версиями индексов
+    
+    **Архитектурные особенности:**
+    - Асинхронная обработка (возвращает job_id)
+    - Интеграция с Kafka для уведомлений о завершении
+    - Поддержка распределённой трассировки через W3C Trace-Context
+    - mTLS через Istio
+    - Prometheus метрики для мониторинга
+    
+    **Модель данных:**
+    - **Index** - логический комплект документации (например, "platform_X")
+    - **Index Version** - конкретная версия индекса (например, "v2.1.0")
+    - **Job** - асинхронная задача индексации
+    
+  version: 1.0.0
+  contact:
+    name: RAG System Team
+    email: rag-team@company.com
+
+servers:
+  - url: https://indexer.rag-system.company.com/api/v1
+    description: Production
+  - url: https://indexer-test.rag-system.company.com/api/v1
+    description: Test/Staging
+
+tags:
+  - name: Index Management
+    description: Управление индексами и версиями
+  - name: Jobs
+    description: Управление асинхронными задачами
+  - name: System
+    description: Системные endpoints (health, ready, metrics)
+
+components:
+  securitySchemes:
+    mTLS:
+      type: http
+      scheme: mutual
+      description: mTLS аутентификация через Istio
+  
+  parameters:
+    TraceParentHeader:
+      name: traceparent
+      in: header
+      required: false
+      schema:
+        type: string
+        pattern: '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+      description: |
+        W3C Trace-Context header для распределённой трассировки.
+        Формат: `00-{trace-id}-{span-id}-{trace-flags}`
+        Пример: `00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01`
+    
+    IndexNameParam:
+      name: index_name
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9_]{1,63}$'
+      description: |
+        Логическое имя индекса (комплекта документации).
+        Только lowercase буквы, цифры и underscore. Длина от 2 до 64 символов.
+      example: "platform_x"
+    
+    IndexVersionIdParam:
+      name: index_version_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^idx_\d{8}_\d{6}_[a-f0-9]{8}$'
+      description: |
+        Уникальный технический идентификатор версии индекса.
+        Формат: `idx_{YYYYMMDD}_{HHMMSS}_{hash8}`
+      example: "idx_20260408_143022_a3f2c1e9"
+    
+    JobIdParam:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Уникальный идентификатор задачи индексации
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+  schemas:
+    # ============================================================
+    # Enums
+    # ============================================================
+    JobStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - failed
+        - cancelled
+      description: |
+        Статус задачи:
+        - `pending`: Ожидает начала обработки
+        - `processing`: В процессе обработки
+        - `completed`: Успешно завершена
+        - `failed`: Завершена с ошибкой
+        - `cancelled`: Отменена пользователем
+    
+    VersionStatus:
+      type: string
+      enum:
+        - pending
+        - active
+        - archived
+        - deleted
+        - purged
+      description: |
+        Статус версии индекса:
+        - `pending`: Создается (индексация в процессе)
+        - `active`: Активна (используется для запросов)
+        - `archived`: Архивирована (не активна, но доступна)
+        - `deleted`: Мягко удалена
+        - `purged`: Физически удалена
+    
+    ChunkingStrategy:
+      type: string
+      enum:
+        - fixed
+        - semantic
+      description: |
+        Стратегия разбиения на чанки:
+        - `fixed`: Фиксированный размер с overlap
+        - `semantic`: Семантическое разбиение (по границам абзацев/разделов)
+    
+    SourceType:
+      type: string
+      enum:
+        - folder
+        - documents
+        - auto
+      description: |
+        Тип источника данных:
+        - `folder`: Индексация всей папки
+        - `documents`: Индексация конкретных документов
+        - `auto`: Автоопределение (по index_name)
+
+    # ============================================================
+    # Request/Response Models
+    # ============================================================
+    
+    # --- Create Index (first version) ---
+    CreateIndexRequest:
+      type: object
+      required:
+        - index_name
+        - version_tag
+        - source_uri
+      properties:
+        index_name:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{1,63}$'
+          description: Логическое имя индекса (уникальное)
+          example: "platform_x"
+        display_name:
+          type: string
+          maxLength: 255
+          description: Отображаемое имя индекса
+          example: "Platform X Documentation"
+        description:
+          type: string
+          maxLength: 1000
+          description: Описание индекса
+          example: "Technical documentation for Platform X"
+        version_tag:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9\.\-_]{1,63}$'
+          description: Версия индекса (semver или произвольная)
+          example: "v1.0.0"
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+          default: "folder"
+        source_uri:
+          type: string
+          maxLength: 1024
+          description: URI папки с JSON документами
+          example: "s3://bucket/output/platform_X_v1/"
+        document_uris:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            maxLength: 1024
+          description: Список URI конкретных документов (для source_type=documents)
+          example: ["s3://bucket/output/platform_X_v1/article_1.json"]
+        embedding_model_id:
+          type: string
+          description: ID модели эмбеддингов
+          default: "all-MiniLM-L12-v2"
+          example: "all-MiniLM-L12-v2"
+        chunking:
+          $ref: '#/components/schemas/ChunkingConfig'
+        description:
+          type: string
+          maxLength: 500
+          description: Описание версии
+          example: "Initial release"
+        log_level:
+          type: integer
+          minimum: 0
+          maximum: 3
+          default: 2
+          description: 0=ERROR, 1=WARNING, 2=INFO, 3=DEBUG
+    
+    # --- Create New Version ---
+    CreateVersionRequest:
+      type: object
+      required:
+        - version_tag
+        - source_uri
+      properties:
+        version_tag:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9\.\-_]{1,63}$'
+          description: Новая версия индекса
+          example: "v2.1.0"
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+          default: "folder"
+        source_uri:
+          type: string
+          maxLength: 1024
+          description: URI папки с JSON документами
+          example: "s3://bucket/output/platform_X_v2.1/"
+        document_uris:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            maxLength: 1024
+          description: Список URI конкретных документов
+        embedding_model_id:
+          type: string
+          description: ID модели эмбеддингов
+          default: "all-MiniLM-L12-v2"
+          example: "all-MiniLM-L12-v2"
+        chunking:
+          $ref: '#/components/schemas/ChunkingConfig'
+        based_on_version:
+          type: string
+          description: От какой версии делаем (для traceability)
+          example: "v2.0.0"
+        description:
+          type: string
+          maxLength: 500
+          description: Описание версии
+          example: "Updated for firmware V600R024C10"
+        force_reindex:
+          type: boolean
+          default: false
+          description: Принудительная перезапись существующей версии
+        log_level:
+          type: integer
+          minimum: 0
+          maximum: 3
+          default: 2
+    
+    ChunkingConfig:
+      type: object
+      properties:
+        strategy:
+          $ref: '#/components/schemas/ChunkingStrategy'
+          default: "fixed"
+        chunk_size:
+          type: integer
+          minimum: 100
+          maximum: 2000
+          default: 900
+          description: Размер чанка в символах
+          example: 900
+        chunk_overlap:
+          type: integer
+          minimum: 0
+          maximum: 500
+          default: 150
+          description: Перекрытие чанков в символах
+          example: 150
+    
+    # --- Responses ---
+    CreateIndexResponse:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        display_name:
+          type: string
+          nullable: true
+          example: "Platform X Documentation"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        version:
+          $ref: '#/components/schemas/VersionInfo'
+    
+    CreateVersionResponse:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        version:
+          $ref: '#/components/schemas/VersionInfo'
+    
+    VersionInfo:
+      type: object
+      properties:
+        index_version_id:
+          type: string
+          example: "idx_20260408_143022_a3f2c1e9"
+        version_tag:
+          type: string
+          example: "v1.0.0"
+        job_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        based_on_version:
+          type: string
+          nullable: true
+          example: null
+    
+    JobStatusResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        index_version_id:
+          type: string
+          example: "idx_20260408_143022_a3f2c1e9"
+        index_name:
+          type: string
+          example: "platform_x"
+        version_tag:
+          type: string
+          example: "v1.0.0"
+        operation:
+          type: string
+          enum: ["create_index", "create_version", "delete", "purge"]
+          example: "create_index"
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 45
+        statistics:
+          $ref: '#/components/schemas/JobStatistics'
+        error_message:
+          type: string
+          nullable: true
+          example: null
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-04-08T14:30:25Z"
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: null
+        estimated_completion_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-04-08T14:34:30Z"
+    
+    JobStatistics:
+      type: object
+      properties:
+        documents_processed:
+          type: integer
+          example: 68
+        documents_total:
+          type: integer
+          example: 150
+        documents_failed:
+          type: integer
+          example: 0
+        chunks_created:
+          type: integer
+          example: 5678
+        chunks_estimated:
+          type: integer
+          example: 12500
+        embedding_calls:
+          type: integer
+          example: 5678
+        errors_count:
+          type: integer
+          example: 0
+    
+    CancelJobResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        status:
+          type: string
+          enum: ["cancelled"]
+          example: "cancelled"
+        message:
+          type: string
+          example: "Job cancelled successfully"
+    
+    # --- List Indices ---
+    ListIndicesResponse:
+      type: object
+      properties:
+        indices:
+          type: array
+          items:
+            $ref: '#/components/schemas/IndexSummary'
+        total:
+          type: integer
+          example: 2
+        limit:
+          type: integer
+          example: 50
+        offset:
+          type: integer
+          example: 0
+    
+    IndexSummary:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        display_name:
+          type: string
+          nullable: true
+          example: "Platform X Documentation"
+        description:
+          type: string
+          nullable: true
+          example: "Technical documentation for Platform X"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-01-15T10:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        total_versions:
+          type: integer
+          example: 5
+        active_version:
+          $ref: '#/components/schemas/VersionSummary'
+        latest_version:
+          $ref: '#/components/schemas/VersionSummary'
+    
+    VersionSummary:
+      type: object
+      properties:
+        index_version_id:
+          type: string
+          example: "idx_20260408_143022_a3f2c1e9"
+        version_tag:
+          type: string
+          example: "v2.1.0"
+        status:
+          $ref: '#/components/schemas/VersionStatus'
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        activated_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-04-08T15:00:00Z"
+    
+    # --- Index Details ---
+    IndexDetailsResponse:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        display_name:
+          type: string
+          nullable: true
+          example: "Platform X Documentation"
+        description:
+          type: string
+          nullable: true
+          example: "Technical documentation for Platform X"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-01-15T10:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        total_versions:
+          type: integer
+          example: 5
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionSummary'
+    
+    # --- List Versions ---
+    ListVersionsResponse:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        display_name:
+          type: string
+          nullable: true
+          example: "Platform X Documentation"
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionDetails'
+        total:
+          type: integer
+          example: 5
+    
+    # --- Version Details ---
+    VersionDetailsResponse:
+      type: object
+      properties:
+        index_version_id:
+          type: string
+          example: "idx_20260408_143022_a3f2c1e9"
+        index_name:
+          type: string
+          example: "platform_x"
+        display_name:
+          type: string
+          nullable: true
+          example: "Platform X Documentation"
+        version_tag:
+          type: string
+          example: "v2.1.0"
+        status:
+          $ref: '#/components/schemas/VersionStatus'
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T14:30:22Z"
+        created_by:
+          type: string
+          example: "ml_engineer@company.com"
+        activated_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-04-08T15:00:00Z"
+        deactivated_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: null
+        based_on_version:
+          type: string
+          nullable: true
+          example: "v2.0.0"
+        description:
+          type: string
+          nullable: true
+          example: "Updated for firmware V600R024C10"
+        source:
+          $ref: '#/components/schemas/VersionSource'
+        converter_info:
+          $ref: '#/components/schemas/ConverterInfo'
+        indexer_info:
+          $ref: '#/components/schemas/IndexerInfo'
+        statistics:
+          $ref: '#/components/schemas/VersionStatistics'
+        validation:
+          $ref: '#/components/schemas/VersionValidation'
+    
+    VersionSource:
+      type: object
+      properties:
+        source_uri:
+          type: string
+          example: "s3://bucket/output/platform_X_v2.1/"
+        document_count:
+          type: integer
+          example: 150
+        documents_processed:
+          type: integer
+          example: 150
+        documents_failed:
+          type: integer
+          example: 0
+    
+    ConverterInfo:
+      type: object
+      properties:
+        converter_version:
+          type: string
+          example: "1.3.0"
+        metadata_schema_version:
+          type: string
+          example: "1.3"
+        extraction_date:
+          type: string
+          format: date-time
+          example: "2026-04-08T10:00:00Z"
+    
+    IndexerInfo:
+      type: object
+      properties:
+        indexer_version:
+          type: string
+          example: "1.0.0"
+        embedding_model_id:
+          type: string
+          example: "all-MiniLM-L12-v2"
+        embedding_model_version:
+          type: string
+          example: "1.0.0"
+        chunking_strategy:
+          type: string
+          example: "fixed"
+        chunk_size:
+          type: integer
+          example: 900
+        chunk_overlap:
+          type: integer
+          example: 150
+        batch_size:
+          type: integer
+          example: 64
+        device:
+          type: string
+          example: "cuda"
+    
+    VersionStatistics:
+      type: object
+      properties:
+        total_chunks:
+          type: integer
+          example: 12500
+        total_size_bytes:
+          type: integer
+          example: 472383488
+        avg_chunk_size_bytes:
+          type: integer
+          example: 37790
+        embedding_generation_time_seconds:
+          type: number
+          format: float
+          example: 187.5
+        total_processing_time_seconds:
+          type: number
+          format: float
+          example: 210.3
+    
+    VersionValidation:
+      type: object
+      properties:
+        is_valid:
+          type: boolean
+          example: true
+        warnings_count:
+          type: integer
+          example: 3
+        errors_count:
+          type: integer
+          example: 0
+        warnings:
+          type: array
+          items:
+            type: string
+          example: ["Document 42: Missing recommended field 'product_series'"]
+        errors:
+          type: array
+          items:
+            type: string
+          example: []
+    
+    # --- Delete Responses ---
+    DeleteVersionResponse:
+      type: object
+      properties:
+        index_version_id:
+          type: string
+          example: "idx_20240315_090000_b7c3d2e1"
+        index_name:
+          type: string
+          example: "platform_x"
+        version_tag:
+          type: string
+          example: "v2.0.0"
+        status:
+          type: string
+          enum: ["deleted", "purged"]
+        message:
+          type: string
+        deleted_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T16:00:00Z"
+    
+    PurgeVersionResponse:
+      type: object
+      properties:
+        index_version_id:
+          type: string
+          example: "idx_20240315_090000_b7c3d2e1"
+        index_name:
+          type: string
+          example: "platform_x"
+        version_tag:
+          type: string
+          example: "v2.0.0"
+        status:
+          type: string
+          enum: ["purged"]
+        message:
+          type: string
+        purged_at:
+          type: string
+          format: date-time
+          example: "2026-04-08T16:05:00Z"
+        resources_cleaned:
+          type: object
+          properties:
+            vector_db_collections:
+              type: array
+              items:
+                type: string
+              example: ["platform_x_idx_20240315_090000_b7c3d2e1"]
+            elasticsearch_indices:
+              type: array
+              items:
+                type: string
+              example: ["platform_x_idx_20240315_090000_b7c3d2e1"]
+            postgres_records:
+              type: integer
+              example: 1
+    
+    # --- Error Responses ---
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Version already exists"
+        code:
+          type: string
+          example: "VERSION_ALREADY_EXISTS"
+        details:
+          type: object
+          example:
+            index_name: "platform_x"
+            version_tag: "v2.1.0"
+            existing_version_id: "idx_20240315_090000_b7c3d2e1"
+        request_id:
+          type: string
+          example: "req_abc123"
+        trace_id:
+          type: string
+          example: "0af7651916cd43dd8448eb211c80319c"
+    
+    ConflictDetails:
+      type: object
+      properties:
+        index_name:
+          type: string
+          example: "platform_x"
+        version_tag:
+          type: string
+          example: "v2.1.0"
+        existing_version_id:
+          type: string
+          example: "idx_20240315_090000_b7c3d2e1"
+        existing_created_at:
+          type: string
+          format: date-time
+          example: "2026-03-15T09:00:00Z"
+        existing_status:
+          type: string
+          example: "active"
+        suggestion:
+          type: string
+          example: "Use a different version_tag or set force_reindex=true"
+    
+    # --- Health Check ---
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: "healthy"
+        version:
+          type: string
+          example: "1.0.0"
+        components:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [up, down]
+              latency_ms:
+                type: integer
+    
+    ReadyResponse:
+      type: object
+      properties:
+        ready:
+          type: boolean
+          example: true
+        checks:
+          type: object
+          additionalProperties:
+            type: boolean
+          example:
+            postgres: true
+            vector_db: true
+            elasticsearch: true
+            kafka: true
+
+  responses:
+    BadRequest:
+      description: Неверный запрос (400)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Не авторизован (401)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Ресурс не найден (404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Конфликт (409)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalServerError:
+      description: Внутренняя ошибка сервера (500)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Сервис временно недоступен (503)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+paths:
+  # ============================================================
+  # Index Management
+  # ============================================================
+  
+  /index:
+    post:
+      summary: Создание нового индекса
+      description: |
+        Создает новый логический индекс (комплект документации) с первой версией.
+        
+        **Валидация:**
+        - `index_name` должен быть уникальным
+        - `version_tag` должен быть уникальным в рамках индекса
+        - `source_uri` должен существовать и содержать JSON файлы
+        
+        **Результат:**
+        - Создается запись в PostgreSQL
+        - Запускается асинхронная задача индексации
+        - Возвращается job_id для отслеживания
+      operationId: createIndex
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIndexRequest'
+            examples:
+              new_index:
+                summary: Новый индекс
+                value:
+                  index_name: "platform_x"
+                  display_name: "Platform X Documentation"
+                  description: "Technical documentation for Platform X"
+                  version_tag: "v1.0.0"
+                  source_uri: "s3://bucket/output/platform_X_v1/"
+                  embedding_model_id: "all-MiniLM-L12-v2"
+                  chunking:
+                    strategy: "fixed"
+                    chunk_size: 900
+                    chunk_overlap: 150
+                  log_level: 2
+      responses:
+        '201':
+          description: Индекс создан, задача запущена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateIndexResponse'
+              example:
+                index_name: "platform_x"
+                display_name: "Platform X Documentation"
+                created_at: "2026-04-08T14:30:22Z"
+                version:
+                  index_version_id: "idx_20260408_143022_a3f2c1e9"
+                  version_tag: "v1.0.0"
+                  job_id: "550e8400-e29b-41d4-a716-446655440000"
+                  status: "pending"
+                  based_on_version: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Индекс или версия уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Index already exists"
+                code: "INDEX_ALREADY_EXISTS"
+                details:
+                  index_name: "platform_x"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    get:
+      summary: Список индексов
+      description: |
+        Возвращает список всех логических индексов с фильтрацией.
+        
+        **Фильтрация:**
+        - `status` - active/archived/deleted/all (default: active)
+        - `limit` - до 100 записей
+        - `offset` - пагинация
+      operationId: listIndices
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, archived, deleted, all]
+            default: active
+          description: Фильтр по статусу индекса
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Список индексов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListIndicesResponse'
+              example:
+                indices:
+                  - index_name: "platform_x"
+                    display_name: "Platform X Documentation"
+                    description: "Technical documentation for Platform X"
+                    created_at: "2026-01-15T10:00:00Z"
+                    updated_at: "2026-04-08T14:30:22Z"
+                    total_versions: 5
+                    active_version:
+                      index_version_id: "idx_20260408_143022_a3f2c1e9"
+                      version_tag: "v2.1.0"
+                      status: "active"
+                      created_at: "2026-04-08T14:30:22Z"
+                      activated_at: "2026-04-08T15:00:00Z"
+                    latest_version:
+                      index_version_id: "idx_20260408_143022_a3f2c1e9"
+                      version_tag: "v2.1.0"
+                      status: "active"
+                      created_at: "2026-04-08T14:30:22Z"
+                      activated_at: "2026-04-08T15:00:00Z"
+                total: 1
+                limit: 50
+                offset: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/{index_name}:
+    get:
+      summary: Детальная информация об индексе
+      description: Возвращает подробную информацию о логическом индексе
+      operationId: getIndex
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexNameParam'
+      responses:
+        '200':
+          description: Информация об индексе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexDetailsResponse'
+              example:
+                index_name: "platform_x"
+                display_name: "Platform X Documentation"
+                description: "Technical documentation for Platform X"
+                created_at: "2026-01-15T10:00:00Z"
+                updated_at: "2026-04-08T14:30:22Z"
+                total_versions: 5
+                versions:
+                  - index_version_id: "idx_20260408_143022_a3f2c1e9"
+                    version_tag: "v2.1.0"
+                    status: "active"
+                    created_at: "2026-04-08T14:30:22Z"
+                    activated_at: "2026-04-08T15:00:00Z"
+                  - index_version_id: "idx_20240315_090000_b7c3d2e1"
+                    version_tag: "v2.0.0"
+                    status: "archived"
+                    created_at: "2026-03-15T09:00:00Z"
+                    activated_at: "2026-03-15T10:00:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/{index_name}/new_version:
+    post:
+      summary: Создание новой версии индекса
+      description: |
+        Добавляет новую версию к существующему индексу.
+        
+        **Валидация:**
+        - Индекс должен существовать
+        - `version_tag` должен быть уникальным в рамках индекса
+        - `source_uri` должен существовать и содержать JSON файлы
+        
+        **Результат:**
+        - Создается новая версия в PostgreSQL
+        - Запускается асинхронная задача индексации
+        - Возвращается job_id для отслеживания
+      operationId: createVersion
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexNameParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVersionRequest'
+            examples:
+              new_version:
+                summary: Новая версия
+                value:
+                  version_tag: "v2.1.0"
+                  source_uri: "s3://bucket/output/platform_X_v2.1/"
+                  embedding_model_id: "all-MiniLM-L12-v2"
+                  chunking:
+                    strategy: "fixed"
+                    chunk_size: 900
+                    chunk_overlap: 150
+                  based_on_version: "v2.0.0"
+                  description: "Updated for firmware V600R024C10"
+                  log_level: 2
+              hotfix:
+                summary: Хотфикс
+                value:
+                  version_tag: "v2.0.1-hotfix"
+                  source_uri: "s3://bucket/output/platform_X_v2.1_hotfix/"
+                  force_reindex: true
+                  description: "Fixed missing images in documentation"
+      responses:
+        '201':
+          description: Версия создана, задача запущена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateVersionResponse'
+              example:
+                index_name: "platform_x"
+                version:
+                  index_version_id: "idx_20260408_150000_c4d5e6f7"
+                  version_tag: "v2.1.0"
+                  job_id: "550e8400-e29b-41d4-a716-446655440001"
+                  status: "pending"
+                  based_on_version: "v2.0.0"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Индекс не найден
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Версия уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Version already exists"
+                code: "VERSION_ALREADY_EXISTS"
+                details:
+                  index_name: "platform_x"
+                  version_tag: "v2.1.0"
+                  existing_version_id: "idx_20240315_090000_b7c3d2e1"
+                  existing_created_at: "2026-03-15T09:00:00Z"
+                  existing_status: "active"
+                  suggestion: "Use a different version_tag or set force_reindex=true"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/{index_name}/versions:
+    get:
+      summary: Список версий индекса
+      description: Возвращает список всех версий указанного индекса
+      operationId: listVersions
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexNameParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, active, archived, deleted, all]
+            default: active
+          description: Фильтр по статусу версии
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Список версий
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListVersionsResponse'
+              example:
+                index_name: "platform_x"
+                display_name: "Platform X Documentation"
+                versions:
+                  - index_version_id: "idx_20260408_150000_c4d5e6f7"
+                    version_tag: "v2.1.0"
+                    status: "active"
+                    created_at: "2026-04-08T15:00:00Z"
+                    activated_at: "2026-04-08T15:30:00Z"
+                    based_on_version: "v2.0.0"
+                    description: "Updated for firmware V600R024C10"
+                    statistics:
+                      document_count: 150
+                      chunk_count: 12500
+                      size_mb: 450.5
+                  - index_version_id: "idx_20240315_090000_b7c3d2e1"
+                    version_tag: "v2.0.0"
+                    status: "archived"
+                    created_at: "2026-03-15T09:00:00Z"
+                    activated_at: "2026-03-15T10:00:00Z"
+                    deactivated_at: "2026-04-08T15:30:00Z"
+                    statistics:
+                      document_count: 148
+                      chunk_count: 11800
+                      size_mb: 425.2
+                total: 5
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/version/{index_version_id}:
+    get:
+      summary: Детальная информация о версии
+      description: |
+        Возвращает полную информацию о конкретной версии индекса.
+        
+        **Включает:**
+        - Метаданные индекса
+        - Информацию о Converter
+        - Информацию об Indexer
+        - Статистику
+        - Результаты валидации
+      operationId: getVersion
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexVersionIdParam'
+      responses:
+        '200':
+          description: Информация о версии
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionDetailsResponse'
+              example:
+                index_version_id: "idx_20260408_143022_a3f2c1e9"
+                index_name: "platform_x"
+                display_name: "Platform X Documentation"
+                version_tag: "v2.1.0"
+                status: "active"
+                created_at: "2026-04-08T14:30:22Z"
+                created_by: "ml_engineer@company.com"
+                activated_at: "2026-04-08T15:00:00Z"
+                deactivated_at: null
+                based_on_version: "v2.0.0"
+                description: "Updated for firmware V600R024C10"
+                source:
+                  source_uri: "s3://bucket/output/platform_X_v2.1/"
+                  document_count: 150
+                  documents_processed: 150
+                  documents_failed: 0
+                converter_info:
+                  converter_version: "1.3.0"
+                  metadata_schema_version: "1.3"
+                  extraction_date: "2026-04-08T10:00:00Z"
+                indexer_info:
+                  indexer_version: "1.0.0"
+                  embedding_model_id: "all-MiniLM-L12-v2"
+                  embedding_model_version: "1.0.0"
+                  chunking_strategy: "fixed"
+                  chunk_size: 900
+                  chunk_overlap: 150
+                  batch_size: 64
+                  device: "cuda"
+                statistics:
+                  total_chunks: 12500
+                  total_size_bytes: 472383488
+                  avg_chunk_size_bytes: 37790
+                  embedding_generation_time_seconds: 187.5
+                  total_processing_time_seconds: 210.3
+                validation:
+                  is_valid: true
+                  warnings_count: 3
+                  errors_count: 0
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      summary: Мягкое удаление версии
+      description: |
+        Помечает версию индекса как `deleted`.
+        
+        **Эффект:**
+        - Версия исключается из поиска
+        - Данные остаются в хранилищах
+        - Возможно восстановление
+        - Для физического удаления используйте `/purge`
+      operationId: deleteVersion
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexVersionIdParam'
+      responses:
+        '200':
+          description: Версия помечена как удаленная
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteVersionResponse'
+              example:
+                index_version_id: "idx_20240315_090000_b7c3d2e1"
+                index_name: "platform_x"
+                version_tag: "v2.0.0"
+                status: "deleted"
+                message: "Version marked as deleted. Use PURGE for physical removal."
+                deleted_at: "2026-04-08T16:00:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Невозможно удалить (активная версия)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Cannot delete active version"
+                code: "ACTIVE_VERSION_CANNOT_BE_DELETED"
+                details:
+                  index_version_id: "idx_20260408_143022_a3f2c1e9"
+                  index_name: "platform_x"
+                  version_tag: "v2.1.0"
+                  suggestion: "Deactivate the version first"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/version/{index_version_id}/purge:
+    delete:
+      summary: Физическое удаление версии
+      description: |
+        Полностью удаляет версию индекса из всех хранилищ.
+        
+        **Эффект:**
+        - Удаление из Vector DB (Qdrant)
+        - Удаление из Elasticsearch
+        - Удаление метаданных из PostgreSQL
+        - Данные НЕ ВОССТАНАВЛИВАЮТСЯ
+      operationId: purgeVersion
+      tags: [Index Management]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/IndexVersionIdParam'
+      responses:
+        '200':
+          description: Версия физически удалена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurgeVersionResponse'
+              example:
+                index_version_id: "idx_20240315_090000_b7c3d2e1"
+                index_name: "platform_x"
+                version_tag: "v2.0.0"
+                status: "purged"
+                message: "Version physically removed from Vector DB and Elasticsearch."
+                purged_at: "2026-04-08T16:05:00Z"
+                resources_cleaned:
+                  vector_db_collections: ["platform_x_idx_20240315_090000_b7c3d2e1"]
+                  elasticsearch_indices: ["platform_x_idx_20240315_090000_b7c3d2e1"]
+                  postgres_records: 1
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Невозможно удалить (активная версия)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  # ============================================================
+  # Jobs
+  # ============================================================
+  
+  /index/job/{job_id}/status:
+    get:
+      summary: Статус задачи индексации
+      description: |
+        Возвращает детальную информацию о задаче индексации.
+        
+        **Включает:**
+        - Текущий статус и прогресс
+        - Статистику обработки
+        - Оценку времени завершения
+      operationId: getJobStatus
+      tags: [Jobs]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: Статус задачи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+              examples:
+                processing:
+                  summary: Задача в процессе
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    index_version_id: "idx_20260408_143022_a3f2c1e9"
+                    index_name: "platform_x"
+                    version_tag: "v1.0.0"
+                    operation: "create_index"
+                    status: "processing"
+                    progress_percent: 45
+                    statistics:
+                      documents_processed: 68
+                      documents_total: 150
+                      documents_failed: 0
+                      chunks_created: 5678
+                      chunks_estimated: 12500
+                      embedding_calls: 5678
+                      errors_count: 0
+                    error_message: null
+                    created_at: "2026-04-08T14:30:22Z"
+                    started_at: "2026-04-08T14:30:25Z"
+                    completed_at: null
+                    estimated_completion_at: "2026-04-08T14:34:30Z"
+                completed:
+                  summary: Задача завершена
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    index_version_id: "idx_20260408_143022_a3f2c1e9"
+                    index_name: "platform_x"
+                    version_tag: "v1.0.0"
+                    operation: "create_index"
+                    status: "completed"
+                    progress_percent: 100
+                    statistics:
+                      documents_processed: 150
+                      documents_total: 150
+                      documents_failed: 0
+                      chunks_created: 12500
+                      chunks_estimated: 12500
+                      embedding_calls: 12500
+                      errors_count: 0
+                    error_message: null
+                    created_at: "2026-04-08T14:30:22Z"
+                    started_at: "2026-04-08T14:30:25Z"
+                    completed_at: "2026-04-08T14:34:30Z"
+                    estimated_completion_at: null
+                failed:
+                  summary: Задача завершена с ошибкой
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    index_version_id: "idx_20260408_143022_a3f2c1e9"
+                    index_name: "platform_x"
+                    version_tag: "v1.0.0"
+                    operation: "create_index"
+                    status: "failed"
+                    progress_percent: 23
+                    statistics:
+                      documents_processed: 35
+                      documents_total: 150
+                      documents_failed: 1
+                      chunks_created: 2800
+                      chunks_estimated: 12500
+                      embedding_calls: 2800
+                      errors_count: 1
+                    error_message: "Failed to process document: article_42.json - Invalid JSON format"
+                    created_at: "2026-04-08T14:30:22Z"
+                    started_at: "2026-04-08T14:30:25Z"
+                    completed_at: "2026-04-08T14:32:10Z"
+                    estimated_completion_at: null
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  /index/job/{job_id}/cancel:
+    post:
+      summary: Отмена задачи индексации
+      description: |
+        Отменяет выполняющуюся задачу индексации.
+        
+        **Возможные состояния:**
+        - `pending` → задача удаляется из очереди
+        - `processing` → отправляется сигнал остановки
+        - `completed/failed/cancelled` → возвращается 409 Conflict
+      operationId: cancelJob
+      tags: [Jobs]
+      parameters:
+        - $ref: '#/components/parameters/TraceParentHeader'
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: Задача отменена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelJobResponse'
+              example:
+                job_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "cancelled"
+                message: "Job cancelled successfully"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Невозможно отменить (задача уже завершена)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Cannot cancel job: job already completed"
+                code: "JOB_ALREADY_COMPLETED"
+                details:
+                  job_id: "550e8400-e29b-41d4-a716-446655440000"
+                  status: "completed"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  
+  # ============================================================
+  # System Endpoints
+  # ============================================================
+  
+  /health:
+    get:
+      summary: Liveness probe
+      description: |
+        Проверка живости сервиса для Kubernetes liveness probe.
+        Возвращает 200 OK если сервис работает (процесс жив).
+        Не проверяет зависимости (для этого есть /ready).
+      operationId: health
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Сервис жив
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "healthy"
+                version: "1.0.0"
+                components: {}
+        '503':
+          description: Сервис нездоров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "unhealthy"
+                version: "1.0.0"
+                components: {}
+  
+  /ready:
+    get:
+      summary: Readiness probe
+      description: |
+        Проверка готовности сервиса для Kubernetes readiness probe.
+        Проверяет доступность всех зависимостей (PostgreSQL, Vector DB, Elasticsearch, Kafka).
+        Возвращает 200 OK только если сервис готов принимать трафик.
+      operationId: ready
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Сервис готов принимать трафик
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                ready: true
+                checks:
+                  postgres: true
+                  vector_db: true
+                  elasticsearch: true
+                  kafka: true
+        '503':
+          description: Сервис не готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                ready: false
+                checks:
+                  postgres: true
+                  vector_db: true
+                  elasticsearch: false
+                  kafka: true
+  
+  /metrics:
+    get:
+      summary: Prometheus метрики
+      description: |
+        Возвращает метрики в формате Prometheus для мониторинга.
+        
+        **Доступные метрики:**
+        - `indexer_requests_total` — общее количество запросов
+        - `indexer_requests_duration_seconds` — длительность запросов (histogram)
+        - `indexer_errors_total` — количество ошибок
+        - `indexer_jobs_total` — количество задач по статусу
+        - `indexer_active_jobs` — количество активных задач
+        - `indexer_documents_processed_total` — обработанные документы
+        - `indexer_chunks_created_total` — созданные чанки
+        - `indexer_embedding_calls_total` — вызовы Embedding Service
+      operationId: metrics
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Метрики в формате Prometheus
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP indexer_requests_total Total number of requests
+                # TYPE indexer_requests_total counter
+                indexer_requests_total{method="POST",endpoint="/index"} 42
+                indexer_requests_total{method="GET",endpoint="/index/status"} 156
+                
+                # HELP indexer_jobs_total Total number of indexing jobs
+                # TYPE indexer_jobs_total counter
+                indexer_jobs_total{status="pending"} 5
+                indexer_jobs_total{status="processing"} 3
+                indexer_jobs_total{status="completed"} 28
+                indexer_jobs_total{status="failed"} 4
+                indexer_jobs_total{status="cancelled"} 2
+                
+                # HELP indexer_active_jobs Currently active jobs
+                # TYPE indexer_active_jobs gauge
+                indexer_active_jobs 3
+                
+                # HELP indexer_documents_processed_total Documents processed
+                # TYPE indexer_documents_processed_total counter
+                indexer_documents_processed_total 12500
+        '500':
+          description: Ошибка получения метрик
