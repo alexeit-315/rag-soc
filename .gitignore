@@ -1,11 +1,39 @@
-models/
-docs/.prompts/
+# Virtual environments
+**/venv_prepare/
+**/venv_index/
+**/venv_*/
+**/venv/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Build artifacts
+**/*.egg-info/
+**/*.egg-info/*
+
+# Backup files
+*.bak
+*.bkp
+**/*.bak
+**/*.bkp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Your specific paths
+/models/
+/docs/.prompts/
+/source/
+/tests/
 services/rag-soc-indexer/logs/
 services/rag-soc-indexer/old/
 services/rag-soc-indexer/vector_index_gpu/
-services/rag-soc-indexer/venv_index/
-services/rag-soc-converter/venv_prepare/
-services/rag-soc-converter/hdx_converter.egg-info
-source/
-tests/
-
