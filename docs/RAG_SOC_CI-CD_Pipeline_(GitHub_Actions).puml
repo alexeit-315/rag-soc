@@ -1,0 +1,260 @@
+@startuml
+title RAG SOC CI/CD Pipeline (GitHub Actions)
+
+skinparam backgroundColor #FFFFFF
+skinparam sequenceMessageAlign center
+skinparam participantStyle rectangle
+skinparam noteFontColor #FFFFFF
+skinparam noteBackgroundColor #4A90E2
+
+participant "GitHub\nRepository" as Repo
+participant "GitHub Actions\nController" as Controller
+participant "Hosted Runners\n(ubuntu-latest)" as Hosted
+participant "Self-Hosted Runners\n(K8s Pod)" as SelfHosted
+participant "Harbor\nRegistry" as Harbor
+participant "K8s\nStaging" as Staging
+participant "K8s\nProduction" as Prod
+participant "Prometheus\n+ Grafana" as Monitoring
+
+== Trigger (Push / PR) ==
+
+Repo -> Controller : Webhook (push / pull_request)
+activate Controller
+
+== Lint Stage (Hosted) ==
+
+Controller -> Hosted : lint-ruff job
+activate Hosted
+Hosted -> Hosted : ruff check + format
+Hosted -> Hosted : mypy --strict
+Hosted --> Repo : Upload lint report (artifact)
+deactivate Hosted
+
+note right: Блокировка PR\nпри провале
+
+== Unit Test Stage (Hosted) ==
+
+Controller -> Hosted : test-unit job
+activate Hosted
+Hosted -> Hosted : pytest --cov --cov-fail-under=50
+Hosted --> Repo : Upload coverage + JUnit report
+deactivate Hosted
+
+note right: Блокировка мержа\nпри coverage < 50%
+
+== Integration Test Stage (Self-Hosted) ==
+
+Controller -> SelfHosted : test-integration job
+activate SelfHosted
+SelfHosted -> SelfHosted : Запуск testcontainers\n(Postgres, Redis, Qdrant)
+SelfHosted -> SelfHosted : pytest integration tests
+SelfHosted --> Repo : Upload JUnit report
+deactivate SelfHosted
+
+note right: Блокировка деплоя\nв staging
+
+== SAST Stage (Hosted) ==
+
+Controller -> Hosted : security-sast job
+activate Hosted
+Hosted -> Hosted : Semgrep --config auto
+Hosted --> Repo : Upload SARIF report
+deactivate Hosted
+
+note right: Warning при critical\n(блокировка после 3 раз)
+
+== Build Stage (Self-Hosted) ==
+
+Controller -> SelfHosted : build job
+activate SelfHosted
+SelfHosted -> Harbor : docker login
+activate Harbor
+SelfHosted -> Harbor : docker build + push\n(image:tag=commit_sha)
+Harbor -> Harbor : Trivy scan\n(уязвимости образов)
+deactivate Harbor
+SelfHosted --> Repo : Upload image manifest
+deactivate SelfHosted
+
+== SCA Stage (Hosted) ==
+
+Controller -> Hosted : security-sca job
+activate Hosted
+Hosted -> Hosted : pip-audit --severity high
+Hosted --> Repo : Upload SCA report (JSON)
+deactivate Hosted
+
+note right: Warning при critical\n(блокировка после 3 раз)
+
+== Deploy Staging (Self-Hosted) ==
+
+Controller -> SelfHosted : deploy-staging job
+activate SelfHosted
+SelfHosted -> Staging : helm upgrade --install\n(namespace: staging)
+activate Staging
+Staging -> Staging : Rolling update\n(K8s Deployment)
+deactivate Staging
+SelfHosted --> Repo : Update deployment status
+deactivate SelfHosted
+
+note right: Environment: staging\n(auto-deploy)
+
+== DAST Stage (Hosted) ==
+
+Controller -> Hosted : validate-dast job
+activate Hosted
+Hosted -> Staging : OWASP ZAP API scan\n(openapi.json)
+Hosted --> Repo : Upload DAST report (HTML)
+deactivate Hosted
+
+note right: Блокировка prod\nпри High/Critical
+
+== E2E Functional Test (Self-Hosted) ==
+
+Controller -> SelfHosted : validate-e2e-functional job
+activate SelfHosted
+SelfHosted -> Staging : pytest tests/e2e/functional/
+SelfHosted --> Repo : Upload JUnit report
+deactivate SelfHosted
+
+note right: Блокировка prod\nпри провале тестов
+
+== E2E Quality Test - RAGAS (Self-Hosted) ==
+
+Controller -> SelfHosted : validate-e2e-quality job
+activate SelfHosted
+SelfHosted -> SelfHosted : pytest + RAGAS\n(faithfulness, correctness)
+SelfHosted -> SelfHosted : extract_ragas_metrics.py
+SelfHosted -> SelfHosted : check_quality_gates.py
+SelfHosted --> Repo : Upload metrics (JSON)
+deactivate SelfHosted
+
+note right: Блокировка prod при\nfaithfulness < 0.8\ncorrectness < 0.75
+
+== Quality Gates Check ==
+
+alt Quality Gates Failed
+
+Repo -> Repo : Stop pipeline
+Repo -> Repo : Notify (Slack/Email)
+
+else Quality Gates Passed
+
+Repo -> Repo : Require manual approval\n(production environment)
+
+end
+
+== Deploy Production - Manual Approval (Self-Hosted) ==
+
+note over Repo: Manual approval\n(maintainer role required)
+
+Controller -> SelfHosted : deploy-prod job
+activate SelfHosted
+
+== Canary 10% ==
+
+SelfHosted -> Prod : helm upgrade\n(canary.weight=10)
+activate Prod
+Prod -> Prod : Istio VirtualService\n(10% traffic)
+deactivate Prod
+
+SelfHosted -> SelfHosted : Wait 60s
+SelfHosted -> Prod : Smoke tests (canary)
+activate Prod
+
+alt Smoke Tests Pass
+
+Prod --> SelfHosted : OK
+deactivate Prod
+
+else Smoke Tests Fail
+
+Prod --> SelfHosted : FAIL
+deactivate Prod
+SelfHosted -> Prod : helm rollback
+activate Prod
+Prod -> Prod : Rollback to previous version
+deactivate Prod
+SelfHosted --> Repo : Notify failure (rollback)
+deactivate SelfHosted
+
+end
+
+== Rollout 50% ==
+
+SelfHosted -> Prod : helm upgrade\n(canary.weight=50)
+activate Prod
+Prod -> Prod : Istio VirtualService\n(50% traffic)
+deactivate Prod
+
+SelfHosted -> SelfHosted : Wait 60s
+SelfHosted -> Prod : Smoke tests (50%)
+activate Prod
+
+alt Smoke Tests Pass
+
+Prod --> SelfHosted : OK
+deactivate Prod
+
+else Smoke Tests Fail
+
+Prod --> SelfHosted : FAIL
+deactivate Prod
+SelfHosted -> Prod : helm rollback
+activate Prod
+Prod -> Prod : Rollback to previous version
+deactivate Prod
+SelfHosted --> Repo : Notify failure (rollback)
+deactivate SelfHosted
+
+end
+
+== Rollout 100% ==
+
+SelfHosted -> Prod : helm upgrade\n(canary.weight=100)
+activate Prod
+Prod -> Prod : Istio VirtualService\n(100% traffic)
+deactivate Prod
+
+SelfHosted -> SelfHosted : Wait 60s
+SelfHosted -> Prod : Final smoke tests
+activate Prod
+
+alt Smoke Tests Pass
+
+Prod --> SelfHosted : OK
+deactivate Prod
+SelfHosted --> Repo : Update deployment status (production)
+
+else Smoke Tests Fail
+
+Prod --> SelfHosted : FAIL
+deactivate Prod
+SelfHosted -> Prod : helm rollback
+activate Prod
+Prod -> Prod : Rollback to previous version
+deactivate Prod
+SelfHosted --> Repo : Notify failure (rollback)
+deactivate SelfHosted
+
+end
+
+deactivate SelfHosted
+deactivate Controller
+
+== Post-Deploy ==
+
+Prod -> Monitoring : Экспорт метрик\n(latency, error rate, RPS)
+activate Monitoring
+Monitoring -> Monitoring : Дашборд:\nRAG SOC Production Overview
+deactivate Monitoring
+
+note bottom: Полный цикл: 20–30 мин\n(для типичного PR в main)
+
+
+== Hosted Runners (ubuntu-latest) используются для лёгких jobs: lint, unit-test, SAST, SCA, DAST. ==
+== Self-Hosted Runners (K8s Pods) используются для тяжёлых jobs: integration-test, build, deploy, e2e-test, quality-test. ==
+== Manual Approval требуется только для deploy-prod (настройка Environment Protection Rules в GitHub). ==
+== Canary-деплой реализован через Istio VirtualService (10% → 50% → 100%) с smoke tests после каждого этапа. ==
+== Auto-rollback срабатывает при провале smoke tests на любом этапе canary. ==
+
+@enduml
