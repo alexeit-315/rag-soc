@@ -1,0 +1,298 @@
+openapi: 3.1.0
+info:
+  title: Experimentation Service
+  description: Сервис для тестирования и дообучения моделей
+  version: 1.0.0
+paths:
+  /api/v1/experiments/detect-language:
+    post:
+      summary: Detect Language
+      description: |-
+        Определение языка документов и подсказка наиболее подходящих моделей
+        Требование №1: Многоязычность
+      operationId: detect_language_api_v1_experiments_detect_language_post
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectLanguageRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectLanguageResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/experiments/run:
+    post:
+      summary: Run Experiment
+      description: Запуск эксперимента
+      operationId: run_experiment_api_v1_experiments_run_post
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunExperimentRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/experiments/:
+    get:
+      summary: List Experiments
+      description: Список экспериментов
+      operationId: list_experiments_api_v1_experiments__get
+      parameters:
+        - name: skip
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            title: Skip
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            title: Limit
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/experiments/{experiment_id}:
+    get:
+      summary: Get Experiment
+      description: Детали эксперимента
+      operationId: get_experiment_api_v1_experiments__experiment_id__get
+      parameters:
+        - name: experiment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            title: Experiment Id
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/experiments/{experiment_id}/rerun:
+    post:
+      summary: Rerun Experiment
+      description: Перезапуск эксперимента
+      operationId: rerun_experiment_api_v1_experiments__experiment_id__rerun_post
+      parameters:
+        - name: experiment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            title: Experiment Id
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/experiments/{experiment_id}/export:
+    get:
+      summary: Export Experiment
+      description: |-
+        Экспорт результатов эксперимента в JSON или CSV формате
+        Требование №3: поддержка экспорта в структурированном формате
+      operationId: export_experiment_api_v1_experiments__experiment_id__export_get
+      parameters:
+        - name: experiment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            title: Experiment Id
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            default: json
+            title: Format
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            title: X-User-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    DetectLanguageRequest:
+      properties:
+        documents:
+          items:
+            type: string
+          type: array
+          title: Documents
+      type: object
+      required:
+        - documents
+      title: DetectLanguageRequest
+    DetectLanguageResponse:
+      properties:
+        detected_language:
+          type: string
+          title: Detected Language
+        recommended_models:
+          items:
+            additionalProperties:
+              type: string
+            type: object
+          type: array
+          title: Recommended Models
+      type: object
+      required:
+        - detected_language
+        - recommended_models
+      title: DetectLanguageResponse
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    RunExperimentRequest:
+      properties:
+        experiment_name:
+          type: string
+          title: Experiment Name
+        model_id:
+          type: string
+          title: Model Id
+        documents:
+          items:
+            type: string
+          type: array
+          title: Documents
+        test_data:
+          items:
+            additionalProperties:
+              type: string
+            type: object
+          type: array
+          title: Test Data
+      type: object
+      required:
+        - experiment_name
+        - model_id
+        - documents
+        - test_data
+      title: RunExperimentRequest
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+              - type: string
+              - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+        - loc
+        - msg
+        - type
+      title: ValidationError
