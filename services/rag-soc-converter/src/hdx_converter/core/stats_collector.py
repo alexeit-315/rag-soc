@@ -7,6 +7,7 @@ class StatisticsCollector:
         self.conversion_stats = ConversionStats()
         self.validation_stats = ValidationStats()
         self.skipped_files: List[SkippedFileInfo] = []
+        self.content_sections_created = 0
         # === ИСПРАВЛЕНИЕ: Флаг наличия ошибок (уже было, проверяем) ===
         self._had_errors = False
         # === КОНЕЦ ИСПРАВЛЕНИЯ ===
@@ -27,6 +28,10 @@ class StatisticsCollector:
             # === ИСПРАВЛЕНИЕ: Если увеличиваем errors_encountered, устанавливаем флаг ===
             if stat_name == "errors_encountered" and value > 0:
                 self._had_errors = True
+                # ДОБАВЛЕНО: Логирование факта инкремента счетчика ошибок
+                import logging
+                logger = logging.getLogger('HDXConverter')
+                logger.error(f"Incremented errors_encountered counter (total: {current + value})")
             # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
     def add_validation_result(self, is_valid: bool, missing_mandatory: List[str],
@@ -82,8 +87,13 @@ class StatisticsCollector:
     def get_statistics_summary(self) -> Dict:
         """Получение сводки статистики"""
         return {
+            "content_sections_created": self.content_sections_created,
             "conversion": self.conversion_stats.model_dump(mode='json'),
             "validation": self.validation_stats.model_dump(mode='json'),
             "skipped_files": len(self.skipped_files),
             "duration": self.conversion_stats.get_duration()
         }
+
+    def increment_content_sections_created(self, count: int = 1):
+        """Увеличить счетчик созданных секций Content"""
+        self.content_sections_created += count

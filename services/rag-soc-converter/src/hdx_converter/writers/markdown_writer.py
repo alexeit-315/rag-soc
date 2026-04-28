@@ -1,3 +1,5 @@
+# writers/markdown_writer.py - ПОЛНЫЙ ФАЙЛ С ИЗМЕНЕНИЯМИ
+
 import re
 import logging
 from pathlib import Path
@@ -8,9 +10,9 @@ from ..writers.file_writer import FileWriter
 class MarkdownWriter:
     def __init__(self, config, logger: logging.Logger = None):
         self.config = config
+        self.file_writer = FileWriter(config, logger=logger)
         self.logger = logger
-        self.file_writer = FileWriter(config, self.logger)
-    
+
     def convert_to_markdown(self, soup: BeautifulSoup, title: str, content: str,
                            navigation: str, html_file: Path, metadata: dict) -> str:
         """Конвертация в Markdown - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
@@ -122,7 +124,7 @@ class MarkdownWriter:
             md_lines.append(line)
 
         return '\n'.join(md_lines).strip()
-    
+
     def _process_code_blocks(self, content: str) -> str:
         """Обработка блоков кода для правильного форматирования"""
         lines = content.split('\n')
@@ -130,12 +132,12 @@ class MarkdownWriter:
         in_code_block = False
         code_block_lines = []
         current_code_block = []
-        
+
         i = 0
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
-            
+
             # Проверяем начало блока кода
             if stripped.startswith('```'):
                 if in_code_block:
@@ -146,16 +148,16 @@ class MarkdownWriter:
                         processed_lines.append('```')
                         processed_lines.extend(unique_code)
                         processed_lines.append('```')
-                    
+
                     current_code_block = []
                     in_code_block = False
                 else:
                     # Открываем новый блок кода
                     in_code_block = True
-                
+
                 i += 1
                 continue
-            
+
             if in_code_block:
                 current_code_block.append(line)
             else:
@@ -169,21 +171,21 @@ class MarkdownWriter:
                         processed_lines.extend(unique_code)
                         processed_lines.append('```')
                         current_code_block = []
-                    
+
                     current_code_block.append(stripped)
                     in_code_block = True
                 else:
                     processed_lines.append(line)
-            
+
             i += 1
-        
+
         # Обработка последнего блока кода, если он остался открытым
         if in_code_block and current_code_block:
             unique_code = self._remove_duplicate_code_lines(current_code_block)
             processed_lines.append('```')
             processed_lines.extend(unique_code)
             processed_lines.append('```')
-        
+
         return '\n'.join(processed_lines)
 
     def _is_cli_command_line(self, line: str, all_lines: list, index: int) -> bool:
@@ -237,29 +239,29 @@ class MarkdownWriter:
             r'^tnl-policy\s+',
             r'^[a-z\-]+\s+[a-z\-]+\s+[a-z0-9\-]+$',  # Команда с параметрами
         ]
-        
+
         line_lower = line.lower()
         for pattern in cli_patterns:
             if re.match(pattern, line_lower):
                 return True
-        
+
         return False
-    
+
     def _remove_duplicate_code_lines(self, lines: List[str]) -> List[str]:
         """Удаление дублирующихся строк кода"""
         if not lines:
             return []
-        
+
         # Удаляем пустые строки в начале и конце
         while lines and not lines[0].strip():
             lines.pop(0)
         while lines and not lines[-1].strip():
             lines.pop()
-        
+
         # Удаляем дубликаты команд
         seen_commands = set()
         unique_lines = []
-        
+
         for line in lines:
             stripped = line.strip()
             if stripped and stripped not in seen_commands:
@@ -267,9 +269,9 @@ class MarkdownWriter:
                 unique_lines.append(line)
             elif not stripped:
                 unique_lines.append(line)
-        
+
         return unique_lines
-    
+
     def _clean_md_content(self, content: str) -> str:
         """Очистка Markdown контента - УПРОЩЕННАЯ ВЕРСИЯ
 
@@ -279,7 +281,7 @@ class MarkdownWriter:
         """
         if not content:
             return ""
-    
+
         # Убираем множественные пустые строки
         result = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
 
@@ -408,15 +410,15 @@ class MarkdownWriter:
         result = re.sub(r'\*(.+?)\*', r'*\1*', result)
 
         return result
-    
+
     def _format_markdown_table(self, table_lines):
         """Форматирование таблицы в Markdown"""
         if not table_lines:
             return []
-        
+
         formatted_lines = []
         has_header = False
-        
+
         for i, line in enumerate(table_lines):
             if i == 0 and ' | ' in line:
                 formatted_lines.append(line)
@@ -428,10 +430,10 @@ class MarkdownWriter:
                 continue
             else:
                 formatted_lines.append(line)
-        
+
         return formatted_lines
 
-    def save_markdown_file(self, content: str, base_filename: str, 
+    def save_markdown_file(self, content: str, base_filename: str,
                           output_dir: Path, title: str = "") -> Optional[Path]:
         """Сохранение Markdown файла без двойного расширения"""
         # Убираем расширение .md если оно уже есть
@@ -501,7 +503,9 @@ class MarkdownWriter:
     def convert_structured_to_markdown(self, structured_data: Dict[str, Any],
                                          navigation: str, html_file: Path, metadata: dict) -> str:
         """Конвертация структурированных данных в Markdown - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-        self.logger.debug(f"=== НАЧАЛО КОНВЕРТАЦИИ STRUCTURED_DATA В MARKDOWN ===")
+        logger = self.logger
+        if logger:
+            logger.debug(f"=== НАЧАЛО КОНВЕРТАЦИИ STRUCTURED_DATA В MARKDOWN ===")
 
         md_content = "<!--\n"
 
@@ -519,7 +523,8 @@ class MarkdownWriter:
         article_title = structured_data.get("metadata", {}).get("article_title", "")
         if article_title:
             md_content += f"# {article_title}\n\n"
-            self.logger.debug(f"Добавлен заголовок статьи: {article_title}")
+            if logger:
+                logger.debug(f"Добавлен заголовок статьи: {article_title}")
 
         # Рекурсивная обработка контента
         def process_element(element, indent_level=0, in_list=False):
@@ -540,42 +545,157 @@ class MarkdownWriter:
                     # ИСПРАВЛЕНИЕ: пропускаем секцию навигации, так как она добавляется отдельно
                     if title and title not in ["Навигация", "Navigation"]:
                         md_content += f"\n{'#' * header_level} {title}\n\n"
-                        self.logger.debug(f"Добавлена секция: {title} (уровень {header_level})")
+                        if logger:
+                            logger.debug(f"Добавлена секция: {title} (уровень {header_level})")
 
                     for item in content:
                         process_element(item, indent_level + 1, False)
 
+                # === НОВОЕ: Обработка новых типов ===
+                elif element_type == "steps":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    if indent_level == 0:
+                        header_level = 2
+                    else:
+                        header_level = min(indent_level + 2, 6)
+
+                    md_content += f"\n{'#' * header_level} {title}\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    md_content += "\n"
+                    if logger:
+                        logger.debug(f"Добавлена steps секция: {title}")
+
+                elif element_type == "example":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **{title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена example секция: {title}")
+
+                elif element_type == "prerequisite":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **{title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена prerequisite секция: {title}")
+
+                elif element_type == "postrequisite":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **{title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена postrequisite секция: {title}")
+
+                elif element_type == "result":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **{title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена result секция: {title}")
+
+                elif element_type == "impact":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **⚠️ {title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена impact секция: {title}")
+
+                elif element_type == "cause":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **❓ {title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена cause секция: {title}")
+
+                elif element_type == "admonition":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **⚠️ {title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    md_content += "\n"
+                    if logger:
+                        logger.debug(f"Добавлена admonition: {title}")
+
+                elif element_type == "log_message":
+                    title = element.get("title", "")
+                    content = element.get("content", [])
+
+                    md_content += f"\n> **📋 {title}**\n\n"
+
+                    for item in content:
+                        process_element(item, indent_level + 1, False)
+
+                    if logger:
+                        logger.debug(f"Добавлена log_message: {title}")
+
+                elif element_type == "figure":
+                    image_data = element.get("image", {})
+                    caption = element.get("caption", "")
+
+                    src = image_data.get("src", "")
+                    alt = image_data.get("alt", "")
+
+                    md_content += f"\n![]({src})\n"
+                    if caption:
+                        md_content += f"*{caption}*\n"
+                    md_content += "\n"
+
+                    if logger:
+                        logger.debug(f"Добавлена figure: caption='{caption[:50]}...'")
+                # === КОНЕЦ НОВОГО ===
+
                 elif element_type == "navigation":
                     # === ИСПРАВЛЕНИЕ: Обработка навигации из structured_data ===
-                    content = element.get("content", "")
-                    if content:
-                        md_content += f"\n\n## Navigation\n\n{content}\n"
-                        self.logger.debug(f"Добавлена навигация из structured_data")
-                    # === КОНЕЦ ИСПРАВЛЕНИЯ ===
-
-                # === НОВОЕ ИСПРАВЛЕНИЕ: Обработка таблиц ===
-                elif element_type == "table":
-                    caption = element.get("caption", "")
-                    header = element.get("header", [])
-                    rows = element.get("rows", [])
-
-                    # Добавляем заголовок таблицы, если есть
-                    if caption:
-                        md_content += f"**{caption}**\n\n"
-
-                    # Формируем Markdown таблицу
-                    if header:
-                        md_content += "| " + " | ".join(header) + " |\n"
-                        md_content += "|" + "|".join([" --- " for _ in header]) + "|\n"
-
-                        for row in rows:
-                            # Убеждаемся, что в строке достаточно элементов
-                            row_data = row[:len(header)] if len(row) > len(header) else row + [""] * (len(header) - len(row))
-                            md_content += "| " + " | ".join(row_data) + " |\n"
-
+                    links = element.get("links", [])
+                    if links:
+                        md_content += f"\n\n## Navigation\n\n"
+                        for link in links:
+                            text = link.get("text", "")
+                            href = link.get("href", "")
+                            md_content += f"- [{text}]({href})\n"
                         md_content += "\n"
-                        self.logger.debug(f"Добавлена таблица: caption='{caption}', колонок={len(header)}, строк={len(rows)}")
-                # === КОНЕЦ НОВОГО ИСПРАВЛЕНИЯ ===
+                        if logger:
+                            logger.debug(f"Добавлена навигация из structured_data: {len(links)} ссылок")
+                    # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
                 elif element_type == "paragraph":
                     content_data = element.get("content", "")
@@ -585,7 +705,8 @@ class MarkdownWriter:
                         for item in content_data:
                             process_element(item, indent_level, in_list)
                         md_content += "\n"
-                    self.logger.debug(f"Обработан параграф")
+                    if logger:
+                        logger.debug(f"Обработан параграф")
 
                 elif element_type == "list":
                     list_type = element.get("list_type", "unordered")
@@ -608,7 +729,8 @@ class MarkdownWriter:
                         md_content += "\n"
                     # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
-                    self.logger.debug(f"Обработан список ({list_type}): {len(items)} элементов")
+                    if logger:
+                        logger.debug(f"Обработан список ({list_type}): {len(items)} элементов")
 
                 elif element_type == "list_item":
                     content_data = element.get("content", [])
@@ -663,7 +785,8 @@ class MarkdownWriter:
                             process_element(item, indent_level, in_list)
                             first = False
 
-                    self.logger.debug(f"Обработан элемент списка")
+                    if logger:
+                        logger.debug(f"Обработан элемент списка")
 
                 elif element_type == "link":
                     text = element.get("text", "")
@@ -677,7 +800,8 @@ class MarkdownWriter:
                     else:
                         md_content += f"[{text}]({href})"
 
-                    self.logger.debug(f"Обработана ссылка: {text} -> {href}")
+                    if logger:
+                        logger.debug(f"Обработана ссылка: {text} -> {href}")
 
                 elif element_type == "code_block":
                     content = element.get("content", "")
@@ -688,24 +812,73 @@ class MarkdownWriter:
                         content = str(content)
 
                     md_content += f"\n```{language}\n{content}\n```\n\n"
-                    self.logger.debug(f"Обработан code_block (язык: {language}, длина: {len(content)} символов)")
+                    if logger:
+                        logger.debug(f"Обработан code_block (язык: {language}, длина: {len(content)} символов)")
 
                 elif element_type == "image":
                     src = element.get("src", "")
                     alt = element.get("alt", "")
 
                     md_content += f"\n![{alt}]({src})\n\n"
-                    self.logger.debug(f"Обработано изображение: {alt} -> {src}")
+                    if logger:
+                        logger.debug(f"Обработано изображение: {alt} -> {src}")
+
+                elif element_type == "table":
+                    caption = element.get("caption", "")
+                    header = element.get("header", [])
+                    rows = element.get("rows", [])
+
+                    if caption:
+                        md_content += f"**{caption}**\n\n"
+
+                    if header:
+                        md_content += "| " + " | ".join(header) + " |\n"
+                        md_content += "|" + "|".join([" --- " for _ in header]) + "|\n"
+
+                        for row in rows:
+                            if isinstance(row, list):
+                                row_strs = []
+                                for cell in row:
+                                    if isinstance(cell, dict) and cell.get("type") == "list":
+                                        # Обрабатываем вложенный список в ячейке
+                                        list_content = []
+                                        for item in cell.get("items", []):
+                                            if item.get("type") == "list_item":
+                                                list_content.append(item.get("text", ""))
+                                        row_strs.append(", ".join(list_content))
+                                    else:
+                                        row_strs.append(str(cell))
+                                md_content += "| " + " | ".join(row_strs) + " |\n"
+                            else:
+                                md_content += "| " + str(row) + " |\n"
+                        md_content += "\n"
+                    if logger:
+                        logger.debug(f"Добавлена таблица: caption='{caption}', колонок={len(header)}, строк={len(rows)}")
 
                 elif element_type == "text":
                     content = element.get("content", "")
-                    md_content += content
+                    semantic_role = element.get("semantic_role", "")
+
+                    # === НОВОЕ: Добавляем маркеры для semantic_role ===
+                    if semantic_role == "cmdname":
+                        md_content += f"`{content}`"
+                    elif semantic_role == "varname":
+                        md_content += f"*{content}*"
+                    elif semantic_role == "uicontrol":
+                        md_content += f"**{content}**"
+                    elif semantic_role == "parmname":
+                        md_content += f"`{content}`"
+                    elif semantic_role == "keyword":
+                        md_content += f"**{content}**"
+                    else:
+                        md_content += content
+                    # === КОНЕЦ НОВОГО ===
 
                 # Рекурсивный обход других полей
                 for key, value in element.items():
                     if key not in ["type", "content", "title", "text", "href", "link_type",
                                   "navigation_type", "language", "src", "alt", "list_type", "items",
-                                  "caption", "header", "rows"]:  # ДОБАВЛЕНО: "caption", "header", "rows"
+                                  "caption", "header", "rows", "semantic_role", "image", "links"]:
                         if isinstance(value, (dict, list)):
                             process_element(value, indent_level, in_list)
 
@@ -721,7 +894,8 @@ class MarkdownWriter:
         # Навигация уже обработана из structured_data
         # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
-        self.logger.debug(f"=== ЗАВЕРШЕНА КОНВЕРТАЦИИ STRUCTURED_DATA В MARKDOWN ===")
-        self.logger.debug(f"Размер MD контента: {len(md_content)} символов")
+        if logger:
+            logger.debug(f"=== ЗАВЕРШЕНА КОНВЕРТАЦИИ STRUCTURED_DATA В MARKDOWN ===")
+            logger.debug(f"Размер MD контента: {len(md_content)} символов")
 
         return md_content

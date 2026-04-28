@@ -1,4 +1,5 @@
-# core/content_processor.py
+# core/content_processor.py - ПОЛНЫЙ ФАЙЛ С ИЗМЕНЕНИЯМИ
+
 from typing import Tuple, List, Dict, Any, Optional, Union
 from bs4 import BeautifulSoup, Tag, NavigableString
 from pathlib import Path
@@ -13,7 +14,7 @@ from ..utils.image_processor import ImageProcessor
 from ..models.schemas import SectionStructure, SectionType
 
 class ContentProcessor:
-    def __init__(self, config, path_resolver, image_processor: ImageProcessor, resolve_link_callback=None, logger: logging.Logger = None):
+    def __init__(self, config, path_resolver, image_processor: ImageProcessor, resolve_link_callback=None, logger: logging.Logger = None, stats_collector=None):
         """Инициализация процессора контента
 
         Args:
@@ -22,6 +23,7 @@ class ContentProcessor:
             image_processor: процессор изображений
             resolve_link_callback: callback для разрешения ссылок
             logger: экземпляр логгера, созданный в cli.py, с необходимым уровнем логирования
+            stats_collector: сборщик статистики
         """
         self.config = config
         self.html_parser = HTMLParser()
@@ -29,6 +31,7 @@ class ContentProcessor:
         self.image_processor = image_processor
         self.resolve_link_callback = resolve_link_callback
         self.logger = logger
+        self.stats_collector = stats_collector
 
     def extract_content_with_links(self, soup: BeautifulSoup, source_file: Path) -> Tuple[Dict[str, Any], List, List]:
         """Извлечение контента в структурированном формате
@@ -61,7 +64,8 @@ class ContentProcessor:
                 "source_path": str(source_file),
                 "extraction_date": datetime.now().isoformat(),
                 "article_title": article_title,
-                "content_type": "structured_article"
+                "content_type": "structured_article",
+                "version": "1.2"
             },
             "content": [],
             "links": {
@@ -70,51 +74,26 @@ class ContentProcessor:
             }
         }
 
-        # Упрощенный поиск task-секций
-        context_divs = content_element.find_all('div', class_='context')
-        steps_divs = content_element.find_all('div', class_='steps-unordered')
+        # Рекурсивно извлекаем все секции
+        all_sections = self._extract_sections_flat(content_element, source_file)
 
-        self.logger.debug(f"Найдено task-секций: context={len(context_divs)}, steps-unordered={len(steps_divs)}")
+        # Подсчитываем количество созданных секций Content
+        content_sections_created = sum(1 for s in all_sections if s.get('type') == 'section' and s.get('title') == 'Content')
 
-        # Обрабатываем context секции
-        for context_div in context_divs:
-            section_data = self._process_task_section(context_div, source_file)
-            if section_data:
-                structured_data["content"].append(section_data)
-                self.logger.debug(f"Добавлена context секция: {section_data.get('title', 'Без заголовка')}")
+        # Добавляем все секции в structured_data
+        structured_data["content"] = all_sections
 
-        # Обрабатываем steps-unordered секции
-        for steps_div in steps_divs:
-            section_data = self._process_task_section(steps_div, source_file)
-            if section_data:
-                structured_data["content"].append(section_data)
-                self.logger.debug(f"Добавлена steps-unordered секция: {section_data.get('title', 'Без заголовка')}")
+        # Логируем статистику
+        if content_sections_created > 0:
+            self.logger.info(f"Всего создано секций Content: {content_sections_created}")
+            if self.stats_collector:
+                self.stats_collector.increment_content_sections_created(content_sections_created)
 
-        # Если не нашли task-секций, используем старую логику
-        if not context_divs and not steps_divs:
-            sections = content_element.find_all('div', class_='section')
-            if sections:
-                for section_div in sections:
-                    section_data = self._process_section(section_div, source_file)
-                    if section_data:
-                        structured_data["content"].append(section_data)
-                self.logger.debug(f"Найдено секций с class='section': {len(sections)}")
-            else:
-                # Если нет секций, обрабатываем весь контент
-                self.logger.debug("Секций не найдено, обрабатываем весь контент")
-                section_data = self._process_general_content(content_element, source_file, "Content")
-                if section_data:
-                    structured_data["content"].append(section_data)
-
-        # Обработка навигации в footer - ТЕПЕРЬ ВОЗВРАЩАЕТ ТЕКСТ
-        navigation_text = self._process_footer_navigation(soup, source_file)
-        if navigation_text:
-            # Добавляем навигацию как текстовый элемент
-            structured_data["content"].append({
-                "type": "navigation",
-                "content": navigation_text
-            })
-            self.logger.debug(f"Добавлена навигация: {navigation_text[:100]}...")
+        # Обработка навигации в footer - выносим в отдельное поле
+        navigation_links = self._process_footer_navigation(soup, source_file)
+        if navigation_links:
+            structured_data["navigation"] = navigation_links
+            self.logger.debug(f"Добавлена навигация: {len(navigation_links)} ссылок")
 
         # Собираем все ссылки из структурированного контента
         structured_data = self._collect_links_from_structured_data(structured_data)
@@ -168,7 +147,7 @@ class ContentProcessor:
 
             return {
                 "type": "section",
-                "title": "",  # Пустой заголовок для секций без заголовка
+                "title": "Content",  # Заголовок по умолчанию для секций без заголовка
                 "content": section_content
             }
 
@@ -199,7 +178,7 @@ class ContentProcessor:
 
         # === ИСПРАВЛЕНИЕ: Сначала ищем специальные секции ===
         # Классы специальных секций
-        special_classes = ['clifunc', 'cliformat', 'cliparam', 'cliview', 'cliexample']
+        special_classes = ['clifunc', 'cliformat', 'cliparam', 'cliview', 'cliexample', 'clidesc', 'clidefaultlevel']
 
         for special_class in special_classes:
             special_divs = container.find_all('div', class_=special_class)
@@ -309,6 +288,54 @@ class ContentProcessor:
             return self._process_table(child, source_file, context)
         # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
+        # === НОВОЕ: Обработка div.steps ===
+        if child.name == 'div' and 'steps' in child.get('class', []):
+            self.logger.debug(f"Найден div.steps - последовательность действий")
+            return self._process_steps_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка div.prereq ===
+        if child.name == 'div' and 'prereq' in child.get('class', []):
+            self.logger.debug(f"Найден div.prereq - предусловия")
+            return self._process_prerequisite_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка div.postreq ===
+        if child.name == 'div' and 'postreq' in child.get('class', []):
+            self.logger.debug(f"Найден div.postreq - постусловия")
+            return self._process_postrequisite_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка admonition (note, caution, danger, warning) ===
+        if child.name == 'div':
+            classes = child.get('class', [])
+            admonition_types = ['note', 'caution', 'danger', 'warning']
+            for adv_type in admonition_types:
+                if adv_type in classes:
+                    self.logger.debug(f"Найден div.{adv_type} - предупреждение/примечание")
+                    return self._process_admonition_section(child, source_file, context, adv_type)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка div.example ===
+        if child.name == 'div' and 'example' in child.get('class', []):
+            self.logger.debug(f"Найден div.example - пример")
+            return self._process_example_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка div.logRef* ===
+        if child.name == 'div':
+            classes = child.get('class', [])
+            if any(cls.startswith('logRef') for cls in classes):
+                self.logger.debug(f"Найден div с logRef классом - сообщение лога")
+                return self._process_log_message_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
+        # === НОВОЕ: Обработка div.fignone ===
+        if child.name == 'div' and 'fignone' in child.get('class', []):
+            self.logger.debug(f"Найден div.fignone - фигура с подписью")
+            return self._process_figure_section(child, source_file, context)
+        # === КОНЕЦ НОВОГО ===
+
         if child.name == 'p':
             try:
                 result = self._process_paragraph(child, source_file, context)
@@ -373,8 +400,27 @@ class ContentProcessor:
         elif child.name == 'span' and child.get_text(strip=True):
             try:
                 text = child.get_text(separator=' ', strip=False).strip()
-                self.logger.debug(f"Обработка span: исходный текст='{child.get_text(strip=False)[:100]}...', результат='{text[:100]}...'")
-                return {"type": "text", "content": text} if text else None
+                if not text:
+                    return None
+
+                # === НОВОЕ: Проверка на semantic_role ===
+                classes = child.get('class', [])
+                result = {"type": "text", "content": text}
+
+                if 'cmdname' in classes:
+                    result["semantic_role"] = "cmdname"
+                elif 'varname' in classes:
+                    result["semantic_role"] = "varname"
+                elif 'uicontrol' in classes:
+                    result["semantic_role"] = "uicontrol"
+                elif 'parmname' in classes:
+                    result["semantic_role"] = "parmname"
+                elif 'keyword' in classes:
+                    result["semantic_role"] = "keyword"
+                # === КОНЕЦ НОВОГО ===
+
+                self.logger.debug(f"Обработка span: результат='{text[:100]}...'")
+                return result
             except Exception as e:
                 self.logger.debug(f"Ошибка при обработке span {context}: {e}")
                 return None
@@ -655,9 +701,9 @@ class ContentProcessor:
             # Для внутренних ссылок используем resolve_link_callback
             if link_type == "internal" and self.resolve_link_callback:
                 target_info = self.resolve_link_callback(href, source_file)
-                if target_info and target_info.get('md_filename'):
-                    # Заменяем оригинальный .html на полное .md имя с DC.Identifier
-                    href = target_info['md_filename']
+                if target_info and target_info.get('json_filename'):
+                    # Заменяем оригинальный .html на полное .json имя с DC.Identifier
+                    href = target_info['json_filename']
 
             return {
                 "text": text,
@@ -668,9 +714,215 @@ class ContentProcessor:
             self.logger.debug(f"Ошибка при извлечении данных из ссылки в {context}: {e}")
             return None
 
-    # === ИСПРАВЛЕНИЕ: Реализация метода _process_table ===
+    # === НОВЫЕ МЕТОДЫ ДЛЯ ОБРАБОТКИ ТИПОВ ===
+
+    def _process_steps_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции steps (последовательность действий)"""
+        # Ищем заголовок
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Procedure"
+
+        if header:
+            header.decompose()
+
+        # Обрабатываем содержимое
+        section_content = self._collect_element_content(section_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "steps",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_prerequisite_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции prerequisite (предусловия)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Prerequisites"
+
+        if header:
+            header.decompose()
+
+        section_content = self._collect_element_content(section_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "prerequisite",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_postrequisite_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции postrequisite (постусловия)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Postrequisites"
+
+        if header:
+            header.decompose()
+
+        section_content = self._collect_element_content(section_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "postrequisite",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_admonition_section(self, section_div: Tag, source_file: Path, context: str, adv_type: str) -> Optional[Dict]:
+        """Обработка секции admonition (note, caution, danger, warning)"""
+        # Ищем заголовок (может быть span с title)
+        title_span = section_div.find('span', class_=f'{adv_type}title')
+        if not title_span:
+            # Может быть span.notetitle
+            title_span = section_div.find('span', class_='notetitle')
+
+        section_title = title_span.get_text().strip() if title_span else adv_type.capitalize()
+
+        # Ищем body
+        body_div = section_div.find('div', class_=f'{adv_type}body')
+        if not body_div:
+            body_div = section_div.find('div', class_='notebody')
+
+        if not body_div and adv_type == 'notice':
+            body_div = section_div.find('div', class_='noticebody')
+
+        if not body_div:
+            body_div = section_div
+
+        if title_span:
+            title_span.decompose()
+
+        # Обрабатываем содержимое body
+        section_content = self._collect_element_content(body_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "admonition",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_example_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции example (пример)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Example"
+
+        if header:
+            header.decompose()
+
+        section_content = self._collect_element_content(section_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "example",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_log_message_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции log_message (сообщение лога)"""
+        # Собираем все части лога
+        log_parts = []
+
+        # logRefMessage - сообщение
+        message_div = section_div.find('div', class_='logRefMessage')
+        if message_div:
+            message_body = message_div.find('div', class_='logRefMessagebody')
+            if message_body:
+                log_parts.append(self._collect_element_content(message_body, source_file, "Message"))
+
+        # logRefDesc - описание
+        desc_div = section_div.find('div', class_='logRefDesc')
+        if desc_div:
+            desc_body = desc_div.find('div', class_='logRefDescbody')
+            if desc_body:
+                log_parts.append(self._collect_element_content(desc_body, source_file, "Description"))
+
+        # logRefLvl - уровень/параметры
+        lvl_div = section_div.find('div', class_='logRefLvl')
+        if lvl_div:
+            lvl_body = lvl_div.find('div', class_='logRefParamsbody')
+            if lvl_body:
+                log_parts.append(self._collect_element_content(lvl_body, source_file, "Parameters"))
+
+        # logRefCause - причина
+        cause_div = section_div.find('div', class_='logRefCause')
+        if cause_div:
+            cause_body = cause_div.find('div', class_='logRefCausebody')
+            if cause_body:
+                log_parts.append(self._collect_element_content(cause_body, source_file, "Cause"))
+
+        # Заголовок секции
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Log Message"
+
+        if header:
+            header.decompose()
+
+        # Объединяем все части
+        flat_content = []
+        for part in log_parts:
+            if isinstance(part, list):
+                flat_content.extend(part)
+            elif part:
+                flat_content.append(part)
+
+        if not flat_content:
+            return None
+
+        return {
+            "type": "log_message",
+            "title": section_title,
+            "content": flat_content
+        }
+
+    def _process_figure_section(self, section_div: Tag, source_file: Path, context: str) -> Optional[Dict]:
+        """Обработка секции figure (изображение с подписью)"""
+        # Ищем изображение
+        img = section_div.find('img')
+        if not img:
+            return None
+
+        # Обрабатываем изображение
+        img_data = self._process_image(img, source_file, context)
+        if not img_data:
+            return None
+
+        # Ищем подпись
+        figcap = section_div.find('span', class_='figcap')
+        caption_text = figcap.get_text().strip() if figcap else ""
+
+        # Убираем номер рисунка из подписи (например, "Figure 1 ")
+        if caption_text.startswith('Figure'):
+            import re
+            caption_text = re.sub(r'^Figure\s+\d+\s+', '', caption_text)
+
+        result = {
+            "type": "figure",
+            "image": img_data,
+            "caption": caption_text
+        }
+
+        self.logger.debug(f"Обработана фигура: caption='{caption_text[:50]}...'")
+
+        return result
+
+    # === КОНЕЦ НОВЫХ МЕТОДОВ ===
+
+    # === ИСПРАВЛЕНИЕ: Реализация метода _process_table с поддержкой списков ===
     def _process_table(self, element: Tag, source_file: Path, context: str) -> Dict:
-        """Обработка таблицы"""
+        """Обработка таблицы - с поддержкой вложенных списков"""
         self.logger.debug(f"Обработка таблицы в контексте: {context}")
 
         try:
@@ -678,14 +930,13 @@ class ContentProcessor:
             caption = element.find('caption')
             caption_text = caption.get_text().strip() if caption else ""
 
-            # Извлекаем заголовки колонок из thead или первой строки с th
+            # Извлекаем заголовки колонок
             header_row = []
             thead = element.find('thead')
             if thead:
                 th_elements = thead.find_all('th')
                 header_row = [th.get_text().strip() for th in th_elements]
 
-            # Если нет thead, ищем первую строку с th
             if not header_row:
                 first_row = element.find('tr')
                 if first_row:
@@ -693,25 +944,44 @@ class ContentProcessor:
                     if th_elements:
                         header_row = [th.get_text().strip() for th in th_elements]
 
-            # Извлекаем все строки данных из tbody или всех tr, которые не являются заголовками
+            # Извлекаем строки данных - с поддержкой вложенных элементов
             rows_data = []
             tbody = element.find('tbody')
             rows_to_process = tbody.find_all('tr') if tbody else element.find_all('tr')
 
             for row in rows_to_process:
-                # Пропускаем строку, если это заголовок (уже обработали)
                 if row.find('th') and not header_row:
                     continue
 
                 cells = row.find_all(['td', 'th'])
-                if cells:
-                    row_text = [cell.get_text().strip() for cell in cells]
-                    # Проверяем, не дублирует ли эта строка заголовок
-                    if header_row and row_text == header_row:
-                        continue
-                    rows_data.append(row_text)
+                if not cells:
+                    continue
 
-            # Формируем структурированные данные таблицы
+                row_cells = []
+                for cell in cells:
+                    # Проверяем вложенные элементы в ячейке
+                    inner_list = cell.find(['ul', 'ol'])
+                    inner_code = cell.find('pre', class_='screen')
+                    inner_link = cell.find('a')
+
+                    if inner_list:
+                        list_data = self._process_list(inner_list, source_file, context)
+                        row_cells.append(list_data)
+                    elif inner_code:
+                        code_data = self._process_code_block(inner_code, source_file, context)
+                        row_cells.append(code_data)
+                    elif inner_link:
+                        link_data = self._process_link(inner_link, source_file, context)
+                        row_cells.append(link_data)
+                    else:
+                        cell_text = cell.get_text().strip()
+                        row_cells.append(cell_text)
+
+                # Проверяем, не дублирует ли строка заголовок
+                if header_row and row_cells == header_row:
+                    continue
+                rows_data.append(row_cells)
+
             table_data = {
                 "type": "table",
                 "caption": caption_text,
@@ -726,7 +996,6 @@ class ContentProcessor:
 
         except Exception as e:
             self.logger.debug(f"Ошибка при обработке таблицы в {context}: {e}")
-            # В случае ошибки возвращаем пустую структуру таблицы
             return {
                 "type": "table",
                 "caption": "",
@@ -900,6 +1169,71 @@ class ContentProcessor:
             "items": list_items
         }
 
+    def _process_result_section(self, section_div: Tag, source_file: Path) -> Optional[Dict]:
+        """Обработка секции result (результат выполнения)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Result"
+
+        if header:
+            header.decompose()
+
+        section_content = self._collect_element_content(section_div, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "result",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_impact_section(self, section_div: Tag, source_file: Path) -> Optional[Dict]:
+        """Обработка секции impactonsystem (влияние на систему)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Impact on the System"
+
+        if header:
+            header.decompose()
+
+        body = section_div.find('div', class_='impactonsystembody')
+        if not body:
+            body = section_div
+
+        section_content = self._collect_element_content(body, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "impact",
+            "title": section_title,
+            "content": section_content
+        }
+
+    def _process_cause_section(self, section_div: Tag, source_file: Path) -> Optional[Dict]:
+        """Обработка секции possiblecauses (возможные причины)"""
+        header = section_div.find(['h2', 'h3', 'h4', 'h5', 'h6'], class_='sectiontitle')
+        section_title = header.get_text().strip() if header else "Possible Causes"
+
+        if header:
+            header.decompose()
+
+        body = section_div.find('div', class_='alarmpossbody')
+        if not body:
+            body = section_div
+
+        section_content = self._collect_element_content(body, source_file, section_title)
+
+        if not section_content:
+            return None
+
+        return {
+            "type": "cause",
+            "title": section_title,
+            "content": section_content
+        }
+
     def _collect_links_from_structured_data(self, structured_data: Dict[str, Any]) -> Dict[str, Any]:
         """Рекурсивно собирает ссылки из структурированных данных
 
@@ -964,13 +1298,11 @@ class ContentProcessor:
 
         return structured_data
 
-    def _process_footer_navigation(self, soup: BeautifulSoup, source_file: Path) -> Optional[str]:
+    def _process_footer_navigation(self, soup: BeautifulSoup, source_file: Path) -> Optional[List[Dict]]:
         """Обработка навигации в footer
-
-        Возвращает готовый текст навигации в формате:
-        "Parent: [Configuring a Tunnel Policy](Configuring a Tunnel Policy_EN-US_TASK_0000001176744357.md)\nPrevious: [Tunnel Management Configuration](Tunnel Management Configuration_EN-US_TASK_0000001176744355.md)\nNext: [Configuring a Tunnel Selector](Configuring a Tunnel Selector_EN-US_TASK_0000001130624890.md)"
+        Возвращает список ссылок
         """
-        navigation_lines = []
+        navigation_links = []
 
         # Ищем footer навигацию
         footer_nav = soup.find('div', class_='footerNavBar')
@@ -989,17 +1321,32 @@ class ContentProcessor:
                         target_info = self.resolve_link_callback(href, source_file)
                         if target_info:
                             article_title = target_info.get('title', 'Parent Topic')
-                            md_filename = target_info.get('md_filename', '')
-                            if md_filename:
-                                navigation_lines.append(f"Parent: [{article_title}]({md_filename})")
+                            json_filename = target_info.get('json_filename', '')
+                            if json_filename:
+                                navigation_links.append({
+                                    "type": "link",
+                                    "text": f"Parent: {article_title}",
+                                    "href": json_filename,
+                                    "link_type": "internal"
+                                })
                             else:
                                 # Fallback: используем текст ссылки
                                 link_text = parent_link.get_text(strip=True)
-                                navigation_lines.append(f"Parent: [{link_text}]({href.replace('.html', '.md')})")
+                                navigation_links.append({
+                                    "type": "link",
+                                    "text": f"Parent: {link_text}",
+                                    "href": href.replace('.html', '.json'),
+                                    "link_type": "internal"
+                                })
                     else:
                         # Без callback используем простую логику
                         link_text = parent_link.get_text(strip=True)
-                        navigation_lines.append(f"Parent: [{link_text}]({href.replace('.html', '.md')})")
+                        navigation_links.append({
+                            "type": "link",
+                            "text": f"Parent: {link_text}",
+                            "href": href.replace('.html', '.json'),
+                            "link_type": "internal"
+                        })
 
         # 2. Previous и Next topic ссылки
         bottom_nav = footer_nav.find('div', class_='bottomNavBtn')
@@ -1023,30 +1370,45 @@ class ContentProcessor:
                     target_info = self.resolve_link_callback(href, source_file)
                     if target_info:
                         article_title = target_info.get('title', f'{nav_type} Topic')
-                        md_filename = target_info.get('md_filename', '')
+                        json_filename = target_info.get('json_filename', '')
 
                         # Очищаем текст от HTML тегов и символов < >
                         clean_title = re.sub(r'<[^>]+>', '', article_title).strip()
                         clean_title = clean_title.replace('<', '').replace('>', '')
 
-                        if md_filename:
-                            navigation_lines.append(f"{nav_type}: [{clean_title}]({md_filename})")
+                        if json_filename:
+                            navigation_links.append({
+                                "type": "link",
+                                "text": f"{nav_type}: {clean_title}",
+                                "href": json_filename,
+                                "link_type": "internal"
+                            })
                         else:
                             # Fallback
                             link_text = link.get_text(strip=True)
                             clean_link_text = re.sub(r'<[^>]+>', '', link_text).strip()
                             clean_link_text = clean_link_text.replace('<', '').replace('>', '')
-                            navigation_lines.append(f"{nav_type}: [{clean_link_text}]({href.replace('.html', '.md')})")
+                            navigation_links.append({
+                                "type": "link",
+                                "text": f"{nav_type}: {clean_link_text}",
+                                "href": href.replace('.html', '.json'),
+                                "link_type": "internal"
+                            })
                 else:
                     # Без callback используем простую логику
                     link_text = link.get_text(strip=True)
                     clean_link_text = re.sub(r'<[^>]+>', '', link_text).strip()
                     clean_link_text = clean_link_text.replace('<', '').replace('>', '')
-                    navigation_lines.append(f"{nav_type}: [{clean_link_text}]({href.replace('.html', '.md')})")
+                    navigation_links.append({
+                        "type": "link",
+                        "text": f"{nav_type}: {clean_link_text}",
+                        "href": href.replace('.html', '.json'),
+                        "link_type": "internal"
+                    })
 
-        if navigation_lines:
-            # Возвращаем готовый текст навигации
-            return "\n".join(navigation_lines)
+        if navigation_links:
+            # Возвращаем структурированные данные навигации
+            return navigation_links
 
         return None
 
@@ -1092,3 +1454,184 @@ class ContentProcessor:
             "title": section_title,
             "content": section_content
         }
+
+    def _process_general_content_for_list(self, elements: List, source_file: Path, section_title: str) -> Optional[Dict]:
+        """Обработка списка элементов как одной секции Content
+
+        Args:
+            elements: список элементов (Tag или NavigableString) для обработки
+            source_file: путь к исходному файлу
+            section_title: заголовок секции
+
+        Returns:
+            Dict: структурированная секция или None
+        """
+        if not elements:
+            return None
+
+        content_elements = []
+        for elem in elements:
+            if isinstance(elem, NavigableString):
+                text = str(elem).strip()
+                if text:
+                    content_elements.append({"type": "text", "content": text})
+            elif isinstance(elem, Tag):
+                child_data = self._process_child_element(elem, source_file, section_title)
+                if child_data:
+                    if isinstance(child_data, list):
+                        content_elements.extend(child_data)
+                    else:
+                        content_elements.append(child_data)
+
+        if not content_elements:
+            return None
+
+        return {
+            "type": "section",
+            "title": section_title,
+            "content": content_elements
+        }
+
+    def _process_general_content_for_list(self, elements: List, source_file: Path, section_title: str) -> Optional[Dict]:
+        """Обработка списка элементов как одной секции Content
+
+        Args:
+            elements: список элементов (Tag или NavigableString) для обработки
+            source_file: путь к исходному файлу
+            section_title: заголовок секции
+
+        Returns:
+            Dict: структурированная секция или None
+        """
+        if not elements:
+            return None
+
+        content_elements = []
+        for elem in elements:
+            if isinstance(elem, NavigableString):
+                text = str(elem).strip()
+                if text:
+                    content_elements.append({"type": "text", "content": text})
+            elif isinstance(elem, Tag):
+                child_data = self._process_child_element(elem, source_file, section_title)
+                if child_data:
+                    if isinstance(child_data, list):
+                        content_elements.extend(child_data)
+                    else:
+                        content_elements.append(child_data)
+
+        if not content_elements:
+            return None
+
+        return {
+            "type": "section",
+            "title": section_title,
+            "content": content_elements
+        }
+
+    def _extract_sections_flat(self, element: Tag, source_file: Path, level: int = 0) -> List[Dict]:
+        """Рекурсивно извлекает секции из элемента, сохраняя плоскую структуру
+
+        Args:
+            element: элемент для обработки
+            source_file: путь к исходному файлу
+            level: уровень вложенности (для отладки)
+
+        Returns:
+            List[Dict]: список секций (плоский)
+        """
+        result = []
+        pending_content = []
+
+        for child in element.children:
+            if not isinstance(child, Tag):
+                text = str(child).strip()
+                if text:
+                    pending_content.append(child)
+                continue
+
+            classes = child.get('class', [])
+
+            # Проверяем, является ли ребенок секцией
+            if self._is_section_element(child):
+                # Сохраняем накопленный контент как секцию Content
+                if pending_content:
+                    content_section = self._process_general_content_for_list(pending_content, source_file, "Content")
+                    if content_section:
+                        result.append(content_section)
+                    pending_content = []
+
+                # Обрабатываем секцию
+                section_data = self._process_section_by_class(child, source_file, classes)
+                if section_data:
+                    result.append(section_data)
+            else:
+                # Проверяем, содержит ли ребенок внутри себя секции
+                if self._contains_sections(child):
+                    # Сохраняем накопленный контент
+                    if pending_content:
+                        content_section = self._process_general_content_for_list(pending_content, source_file, "Content")
+                        if content_section:
+                            result.append(content_section)
+                        pending_content = []
+
+                    # Рекурсивно обрабатываем контейнер, результат добавляем на текущий уровень
+                    nested_sections = self._extract_sections_flat(child, source_file, level + 1)
+                    result.extend(nested_sections)
+                else:
+                    # Обычный элемент без секций - добавляем в накопленный контент
+                    pending_content.append(child)
+
+        # Сохраняем остатки
+        if pending_content:
+            content_section = self._process_general_content_for_list(pending_content, source_file, "Content")
+            if content_section:
+                result.append(content_section)
+
+        return result
+
+    def _is_section_element(self, tag: Tag) -> bool:
+        """Проверяет, является ли элемент секцией"""
+        classes = tag.get('class', [])
+        section_classes = [
+            'context', 'steps', 'steps-unordered', 'example', 'postreq', 'prereq',
+            'result', 'impactonsystem', 'possiblecauses', 'section',
+            'note', 'notice', 'caution', 'danger', 'warning'
+        ]
+        if any(cls.startswith('logRef') for cls in classes):
+            return True
+        return any(cls in section_classes for cls in classes)
+
+    def _contains_sections(self, element: Tag) -> bool:
+        """Проверяет, содержит ли элемент внутри себя секции"""
+        for child in element.find_all(recursive=True):
+            if isinstance(child, Tag) and self._is_section_element(child):
+                return True
+        return False
+
+    def _process_section_by_class(self, tag: Tag, source_file: Path, classes: List[str]) -> Optional[Dict]:
+        """Обрабатывает секцию в зависимости от ее класса"""
+        if 'context' in classes:
+            return self._process_task_section(tag, source_file)
+        elif 'steps' in classes or 'steps-unordered' in classes:
+            return self._process_steps_section(tag, source_file, "")
+        elif 'example' in classes:
+            return self._process_example_section(tag, source_file, "")
+        elif 'postreq' in classes:
+            return self._process_postrequisite_section(tag, source_file, "")
+        elif 'prereq' in classes:
+            return self._process_prerequisite_section(tag, source_file, "")
+        elif 'result' in classes:
+            return self._process_result_section(tag, source_file)
+        elif 'impactonsystem' in classes:
+            return self._process_impact_section(tag, source_file)
+        elif 'possiblecauses' in classes:
+            return self._process_cause_section(tag, source_file)
+        elif 'note' in classes or 'notice' in classes or 'caution' in classes or 'danger' in classes or 'warning' in classes:
+            adv_type = next((a for a in ['note', 'notice', 'caution', 'danger', 'warning'] if a in classes), 'note')
+            return self._process_admonition_section(tag, source_file, "", adv_type)
+        elif any(cls.startswith('logRef') for cls in classes):
+            return self._process_log_message_section(tag, source_file, "")
+        elif 'section' in classes:
+            return self._process_section(tag, source_file)
+        return None

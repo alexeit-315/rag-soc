@@ -20,6 +20,7 @@ class ConversionStats(BaseModel):
     files_with_duplicate_dc_identifier: int = 0
     files_with_long_filenames: int = 0
     files_skipped: int = 0
+    content_sections_created: int = 0
     
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None

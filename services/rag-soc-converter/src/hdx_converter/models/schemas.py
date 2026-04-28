@@ -1,3 +1,4 @@
+# models/schemas.py
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
@@ -9,7 +10,7 @@ class DocumentType(str, Enum):
     CLI_COMMAND = "cli_command"
     CONCEPT = "concept"
     UNKNOWN = "unknown"
-    
+
 class SectionType(str, Enum):
     CONTENT = "content"
     FUNCTION = "function"
@@ -17,6 +18,15 @@ class SectionType(str, Enum):
     PARAMETERS = "parameters"
     EXAMPLE = "example"
     CONFIGURATION_GUIDE = "configuration_guide"
+    STEPS = "steps"  # НОВЫЙ ТИП
+    PREREQUISITE = "prerequisite"  # НОВЫЙ ТИП
+    POSTREQUISITE = "postrequisite"  # НОВЫЙ ТИП
+    ADMONITION = "admonition"  # НОВЫЙ ТИП
+    LOG_MESSAGE = "log_message"  # НОВЫЙ ТИП
+    FIGURE = "figure"  # НОВЫЙ ТИП
+    RESULT = "result"
+    IMPACT = "impact"
+    CAUSE = "cause"
     UNKNOWN = "unknown"
 
 class ApplicabilityScope(str, Enum):
@@ -28,7 +38,7 @@ class HierarchyItem(BaseModel):
     title: str
     dc_identifier: str = ""
     html_filename: str = ""
-    md_filename: str = ""
+    json_filename: str = ""
 
 class SectionStructure(BaseModel):
     section_id: str
@@ -66,10 +76,9 @@ class RelatedArticle(BaseModel):
     dc_identifier: str = ""
     html_filename: str = ""
     html_path: str = ""
-    md_filename: str = ""
+    json_filename: str = ""
 
     class Config:
-        # Разрешаем сериализацию пустых строк
         json_encoders = {
             str: lambda v: v if v else None
         }
@@ -79,7 +88,7 @@ class InternalLink(BaseModel):
     dc_identifier: str = ""
     html_filename: str = ""
     html_path: str = ""
-    md_filename: str = ""
+    json_filename: str = ""
 
 class ExternalLink(BaseModel):
     text: str
@@ -114,7 +123,7 @@ class SourceInfo(BaseModel):
     hdx_hash: str = ""
 
 class ArticleMetadata(BaseModel):
-    metadata_version: str = "1.2"
+    metadata_version: str = "1.3"
     source: SourceInfo
     article: Dict[str, Any]
     technical_metadata: TechnicalMetadata
@@ -125,12 +134,10 @@ class ArticleMetadata(BaseModel):
         arbitrary_types_allowed = True
 
     def dict(self, **kwargs):
-        # Переопределяем сериализацию для обработки Enum и пустых строк
         data = super().model_dump(mode='json', **kwargs)
         return self._clean_serialized_data(data)
 
     def _clean_serialized_data(self, data):
-        """Очистка сериализованных данных"""
         if isinstance(data, dict):
             result = {}
             for key, value in data.items():

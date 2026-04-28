@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import logging
 from ..models.schemas import ArticleMetadata, Validation
 from ..models.config import ConverterConfig
@@ -13,13 +13,22 @@ class MetadataValidator:
         self.logger.debug(f"=== VALIDATE_METADATA НАЧАЛО ===")
 
         validation = Validation()
+        all_errors = []
+        all_warnings = []
+
+        # Проверка структуры документа на основе метаданных
+        structure_errors, structure_warnings = self._check_document_structure_from_metadata(metadata)
+        for err in structure_errors:
+            self.logger.error(f"Structure error: {err}")
+        all_errors.extend(structure_errors)
+        all_warnings.extend(structure_warnings)
 
         # Проверка обязательных полей
         self.logger.debug(f"Проверка mandatory_fields ({len(self.config.mandatory_fields)} полей):")
         missing_mandatory = self._check_mandatory_fields(metadata)
         self.logger.debug(f"  Найдено missing_mandatory: {missing_mandatory}")
 
-        # Проверка рекомендуемых полей (исключаем external_links)
+        # Проверка рекомендуемых полей
         recommended_to_check = [
             field for field in self.config.recommended_fields
             if field != "relations.external_links"
@@ -49,16 +58,12 @@ class MetadataValidator:
         if all_missing_mandatory:
             validation.missing_fields.mandatory = all_missing_mandatory
             self.logger.debug(f"Установлено validation.missing_fields.mandatory: {all_missing_mandatory}")
-            # === ИСПРАВЛЕНИЕ: Логирование ошибок валидации на уровне ERROR ===
             self.logger.error(f"Статья '{metadata.article.get('title', 'Unknown')}' невалидна: отсутствуют обязательные поля: {', '.join(all_missing_mandatory)}")
-            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         if missing_recommended:
             validation.missing_fields.recommended = missing_recommended
             self.logger.debug(f"Установлено validation.missing_fields.recommended: {missing_recommended}")
-            # === ИСПРАВЛЕНИЕ: Логирование предупреждений на уровне WARNING ===
             self.logger.warning(f"Статья '{metadata.article.get('title', 'Unknown')}' имеет предупреждения: отсутствуют рекомендуемые поля: {', '.join(missing_recommended)}")
-            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         if missing_optional:
             validation.missing_fields.optional = missing_optional
@@ -67,33 +72,36 @@ class MetadataValidator:
         # Проверка дополнительных ошибок
         errors = self._check_for_errors(metadata)
         if errors:
-            validation.errors = errors
+            all_errors.extend(errors)
             self.logger.debug(f"Найдены errors: {errors}")
+            for err in errors:
+                self.logger.error(f"Validation error: {err}")
 
         # Определение валидности
-        validation.is_valid = len(all_missing_mandatory) == 0 and len(errors) == 0
-        self.logger.debug(f"validation.is_valid = {validation.is_valid} (missing_mandatory={len(all_missing_mandatory)}, errors={len(errors)})")
+        validation.is_valid = len(all_missing_mandatory) == 0 and len(all_errors) == 0
+        self.logger.debug(f"validation.is_valid = {validation.is_valid} (missing_mandatory={len(all_missing_mandatory)}, errors={len(all_errors)})")
 
         # Предупреждения для сиротских статей
         hierarchy = metadata.article.get("hierarchy", [])
         if hierarchy and len(hierarchy) == 1 and hierarchy[0].get("dc_identifier") == "ORPHAN_ARTICLE":
-            validation.warnings.append("Article has no parent in navigation hierarchy (orphan article)")
+            all_warnings.append("Article has no parent in navigation hierarchy (orphan article)")
             self.logger.debug(f"Добавлено предупреждение: сиротская статья")
-            # === ИСПРАВЛЕНИЕ: Предупреждение для -v1 ===
             self.logger.warning(f"Статья '{metadata.article.get('title', 'Unknown')}' является сиротской (нет родителя в иерархии)")
-            # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
         # Предупреждения для отсутствующих рекомендуемых полей
         if missing_recommended:
             warning_msg = f"Missing recommended fields: {', '.join(missing_recommended)}"
-            validation.warnings.append(warning_msg)
+            all_warnings.append(warning_msg)
             self.logger.debug(f"Добавлено предупреждение: {warning_msg}")
 
         # Предупреждение для отсутствующих external_links
         external_links = metadata.relations.external_links if metadata.relations else []
         if not external_links:
-            validation.warnings.append("No external links found")
+            all_warnings.append("No external links found")
             self.logger.debug(f"Добавлено предупреждение: нет external links")
+
+        validation.errors = all_errors
+        validation.warnings = all_warnings
 
         self.logger.debug(f"=== VALIDATE_METADATA КОНЕЦ: valid={validation.is_valid}, missing_mandatory={len(all_missing_mandatory)} ===")
         return validation
@@ -105,6 +113,17 @@ class MetadataValidator:
         self.logger.debug(f"=== _check_mandatory_fields: проверка {len(self.config.mandatory_fields)} полей ===")
 
         for field_path in self.config.mandatory_fields:
+            # Заменяем старые пути на новые для версии 1.3
+            if metadata.metadata_version == "1.3":
+                if field_path == "relations.parent_article.md_filename":
+                    field_path = "relations.parent_article.json_filename"
+                elif field_path == "relations.previous_article.md_filename":
+                    field_path = "relations.previous_article.json_filename"
+                elif field_path == "relations.next_article.md_filename":
+                    field_path = "relations.next_article.json_filename"
+                elif field_path == "relations.internal_links[].md_filename":
+                    field_path = "relations.internal_links[].json_filename"
+
             value = self._get_nested_value(metadata, field_path)
 
             # === ДОБАВЛЕНО: Логирование для каждого поля ===
@@ -162,13 +181,30 @@ class MetadataValidator:
         dc_identifier = metadata.article.get("dc_identifier", "")
         if dc_identifier and len(dc_identifier) < 5:
             errors.append("dc_identifier слишком короткий")
-        
-        # Проверка иерархии на дубликаты заголовков
+
+        # Проверка иерархии на дубликаты заголовков (только предупреждение, не ошибка)
         hierarchy = metadata.article.get("hierarchy", [])
         titles = [item.get("title", "") for item in hierarchy if item.get("title")]
         if len(titles) != len(set(titles)):
-            errors.append("article.hierarchy contains duplicate titles")
-        
+            # Логируем как warning, не добавляем в errors
+            self.logger.warning(f"article.hierarchy contains duplicate titles for {metadata.article.get('title', 'Unknown')}")
+
+        # Проверка, что ссылки указывают на .json файлы (для версии 1.3)
+        if metadata.metadata_version == "1.3":
+            internal_links = metadata.relations.internal_links if metadata.relations else []
+            for link in internal_links:
+                if link.json_filename and not link.json_filename.endswith('.json'):
+                    errors.append(f"internal link points to non-JSON file: {link.json_filename}")
+
+            if metadata.relations.parent_article.json_filename and not metadata.relations.parent_article.json_filename.endswith('.json'):
+                errors.append("parent_article.json_filename does not end with .json")
+
+            if metadata.relations.previous_article.json_filename and not metadata.relations.previous_article.json_filename.endswith('.json'):
+                errors.append("previous_article.json_filename does not end with .json")
+
+            if metadata.relations.next_article.json_filename and not metadata.relations.next_article.json_filename.endswith('.json'):
+                errors.append("next_article.json_filename does not end with .json")
+
         return errors
     
     def _get_nested_value(self, obj: Any, path: str) -> Any:
@@ -229,3 +265,88 @@ class MetadataValidator:
 
         self.logger.debug(f"=== _get_nested_value КОНЕЦ: возвращаю значение для '{path}': {repr(current)[:100]}..., тип={type(current)} ===")
         return current
+
+    def _check_document_structure(self, metadata: ArticleMetadata, structured_data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        """Проверка структуры документа: заголовок -> секции -> навигация
+
+           Returns:
+           Tuple[List[str], List[str]]: (errors, warnings)
+        """
+        errors = []
+        warnings = []
+
+        # 1. Проверка наличия заголовка статьи
+        article_title = metadata.article.get("title", "")
+        if not article_title:
+            errors.append("Missing article title")
+
+        # 2. Проверка секций
+        section_types = ['section', 'steps', 'example', 'postrequisite', 'prerequisite',
+                         'result', 'impact', 'cause', 'admonition', 'log_message']
+
+        # Типы секций, для которых заголовок не обязателен
+        no_title_required = ['admonition', 'log_message']
+
+        sections = []
+        for item in structured_data.get("content", []):
+            if item.get("type") in section_types:
+                sections.append(item)
+
+        if not sections:
+            errors.append("Document has no sections (all content must be inside sections)")
+
+        # 3. Проверка, что каждая секция имеет заголовок
+        for i, section in enumerate(sections):
+            title = section.get("title", "")
+            if not title and section.get("type") not in no_title_required:
+                errors.append(f"Section {i+1} has no title")
+
+        # 4. Проверка навигации
+        navigation = structured_data.get("navigation", [])
+        if not navigation:
+            warnings.append("Missing navigation (parent/previous/next links) - this is normal for stub/top-level articles")
+
+        return errors, warnings
+
+    def _check_no_free_content(self, structured_data: Dict[str, Any]) -> List[str]:
+        """Проверка, что весь контент находится внутри секций"""
+        errors = []
+
+        section_types = ['section', 'steps', 'example', 'postrequisite', 'prerequisite',
+                         'result', 'impact', 'cause', 'admonition', 'log_message']
+
+        # Все элементы верхнего уровня должны быть секциями или навигацией
+        for item in structured_data.get("content", []):
+            if item.get("type") not in section_types:
+                errors.append(f"Free content found outside sections: {item.get('type', 'unknown')}")
+
+        return errors
+
+    def _check_document_structure_from_metadata(self, metadata: ArticleMetadata) -> Tuple[List[str], List[str]]:
+        """Проверка структуры документа на основе метаданных"""
+        errors = []
+        warnings = []
+
+        # 1. Проверка наличия заголовка статьи
+        article_title = metadata.article.get("title", "")
+        if not article_title:
+            errors.append("Missing article title")
+
+        # 2. Проверка секций из section_structure
+        section_structure = metadata.article.get("section_structure", [])
+        if not section_structure:
+            warnings.append("Document has no sections (may be a simple document without headings)")
+
+        # 3. Проверка, что каждая секция имеет заголовок
+        for i, section in enumerate(section_structure):
+            title = section.get("title", "")
+            if not title:
+                errors.append(f"Section {i+1} has no title")
+
+        # 4. Проверка навигации (по internal_links, которые должны включать parent/previous/next)
+        internal_links = metadata.relations.internal_links if metadata.relations else []
+        navigation_links = [link for link in internal_links if link.text.startswith(('Parent:', 'Previous:', 'Next:'))]
+        if not navigation_links:
+            warnings.append("Missing navigation (parent/previous/next links) - this is normal for stub/top-level articles")
+
+        return errors, warnings

@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import re  # добавил эту строку, так как re используется в методе _analyze_content_flags
 import logging
+import traceback
 
 from bs4 import BeautifulSoup
 
@@ -45,10 +46,13 @@ except ImportError:
     tqdm = lambda x, **kwargs: x
 
 class HDXConverter:
-    def __init__(self, config: ConverterConfig, logger: logging.Logger):
+    def __init__(self, config: ConverterConfig, logger: logging.Logger,
+                 product_series: str = None, compatible_models: List[str] = None,
+                 firmware_version: str = None, skip_metadata_confirmation: bool = False):
         self.config = config
         self.logger = logger
-        
+        self.skip_metadata_confirmation = skip_metadata_confirmation
+
         # Создание директорий
         self._create_directories()
         
@@ -78,7 +82,8 @@ class HDXConverter:
             self.path_resolver,
             self.image_processor,
             resolve_link_callback=self._resolve_link_target,
-            logger=self.logger
+            logger=self.logger,
+            stats_collector=self.stats_collector
         )
         self.validator = MetadataValidator(config, logger=self.logger)
 
@@ -101,6 +106,24 @@ class HDXConverter:
         # Глобальные метаданные
         self.global_firmware_versions = config.global_firmware_versions.copy()
         self.global_platforms = config.global_platforms.copy()
+
+        # Если переданы аргументы командной строки, устанавливаем их сразу
+        if firmware_version:
+            self.global_firmware_versions["primary"] = firmware_version
+            self.global_firmware_versions["all_versions"] = [firmware_version]
+            self.global_firmware_versions["confirmed_by_user"] = True
+
+        if product_series:
+            self.global_platforms["product_series"] = product_series
+            self.global_platforms["confirmed_by_user"] = True
+
+        if compatible_models:
+            self.global_platforms["compatible_models"] = compatible_models
+            self.global_platforms["confirmed_by_user"] = True
+
+        if skip_metadata_confirmation:
+            self.global_firmware_versions["confirmed_by_user"] = True
+            self.global_platforms["confirmed_by_user"] = True
 
         # Статьи с метаданными для интерактивного подтверждения
         self.firmware_articles = []
@@ -182,7 +205,7 @@ class HDXConverter:
 
         except Exception as e:
             # ERROR оставляем - они должны выводиться
-            self.logger.error(f"Conversion failed: {e}")
+            self.logger.error(f"Conversion failedConversion failed: {e}\n{traceback.format_exc()}")
             self.stats_collector.increment_stat("errors_encountered")
             raise
         finally:
@@ -288,7 +311,7 @@ class HDXConverter:
 
             except Exception as e:
                 failed_count += 1
-                self.logger.debug(f"Could not collect info for {html_file}: {e}")
+                self.logger.error(f"Could not collect info for {html_file}: {e}")
 
         self.logger.debug(f"Successfully collected info for {successful_count} files, failed for {failed_count} files")
 
@@ -351,6 +374,16 @@ class HDXConverter:
     
     def _confirm_global_metadata(self):
         """Подтверждение глобальных метаданных с заполнением compatible_models - ИСПРАВЛЕННАЯ ВЕРСИЯ (пункт 5)"""
+        # Если пропуск подтверждения включен, выходим
+        if self.skip_metadata_confirmation:
+            self.logger.info("Skipping metadata confirmation (--skip-metadata-confirmation)")
+            return
+
+        # Если данные уже установлены через аргументы, пропускаем интерактивный ввод
+        if self.global_platforms.get("confirmed_by_user", False) and self.global_firmware_versions.get("confirmed_by_user", False):
+            self.logger.info(f"Using preset metadata: firmware={self.global_firmware_versions.get('primary')}, series={self.global_platforms.get('product_series')}")
+            return
+
         if not hasattr(self, 'firmware_articles') or not hasattr(self, 'platform_articles'):
             self.logger.debug("Metadata articles not found, skipping confirmation")
             return
@@ -527,7 +560,7 @@ class HDXConverter:
                     process_pbar.set_postfix({"file": html_file.name[:30] + "..."})
 
             except Exception as e:
-                self.logger.error(f"Error processing HTML file {html_file}: {e}")
+                self.logger.error(f"Error processing HTML file {html_file}: {e}\n{traceback.format_exc()}")
                 self.stats_collector.increment_stat("errors_encountered")
 
     def _process_single_html_file(self, html_file: Path):
@@ -679,7 +712,7 @@ class HDXConverter:
                         'target': filenames['html'],
                         'title': '',  # Будет заполнено
                         'dc_identifier': '',  # Будет заполнено
-                        'md_filename': filenames['md'],
+                        'json_filename': filenames.get('json', filenames['md'].replace('.md', '.json')),
                         'html_path': href
                     }
                     break
@@ -690,7 +723,7 @@ class HDXConverter:
                     'target': original_filename,
                     'title': '',
                     'dc_identifier': '',
-                    'md_filename': original_filename.replace('.html', '.md'),
+                    'json_filename': original_filename.replace('.html', '.json'),
                     'html_path': href
                 }
 
@@ -701,6 +734,7 @@ class HDXConverter:
                 if metadata:
                     target_info['title'] = metadata.article.get("title", "")
                     target_info['dc_identifier'] = metadata.article.get("dc_identifier", "")
+                    target_info['json_filename'] = metadata.source.json_filename
                     return target_info
 
             # 3. Ищем по оригинальному имени в хранилище метаданных
@@ -710,6 +744,7 @@ class HDXConverter:
                     metadata.source.html_path.endswith(original_filename)):
                     target_info['title'] = metadata.article.get("title", "")
                     target_info['dc_identifier'] = metadata.article.get("dc_identifier", "")
+                    target_info['json_filename'] = metadata.source.json_filename
                     return target_info
 
             # 4. Пытаемся прочитать HTML файл напрямую
@@ -793,6 +828,7 @@ class HDXConverter:
 
             # === ИСПРАВЛЕНИЕ: ВАЛИДАЦИЯ ПОСЛЕ ПОЛНОГО ЗАПОЛНЕНИЯ МЕТАДАННЫХ ===
             if self.config.validate_metadata:
+                # Передаем structured_data для проверки структуры документа
                 validation = self.validator.validate_metadata(metadata)
                 metadata.validation = validation
                 self.stats_collector.add_validation_result(
@@ -832,6 +868,7 @@ class HDXConverter:
     Total tables processed: {conv_stats['tables_processed']}
     Internal links preserved: {conv_stats['internal_links_preserved']}
     Name conflicts resolved: {conv_stats['name_conflicts_resolved']}
+    Content sections created: {conv_stats['content_sections_created']}
     Errors encountered: {conv_stats['errors_encountered']}
 
     Conversion duration: {stats['duration']:.2f} seconds
@@ -947,6 +984,24 @@ class HDXConverter:
         # 2. Обработка internal_links - создаем объекты InternalLink
         normalized_links = []
 
+        # Добавляем ссылки из navigation
+        navigation_links = structured_data.get("navigation", [])
+        for nav_link in navigation_links:
+            if nav_link.get("link_type") == "internal":
+                href = nav_link.get("href", "")
+                if not href:
+                    continue
+                target_info = self._resolve_link_target(href, metadata.source.html_path)
+                normalized_links.append(InternalLink(
+                    text=nav_link.get("text", ""),
+                    dc_identifier=target_info.get('dc_identifier', '') if target_info else '',
+                    html_filename=target_info.get('target', '') if target_info else '',
+                    html_path=href,
+                    json_filename=target_info.get('json_filename', '') if target_info else ''
+                ))
+                logger.debug(f"Добавлена navigation ссылка: {nav_link.get('text')} -> {href}")
+
+
         for link_info in structured_data.get("links", {}).get("internal", []):
             href = link_info.get("href", "")
             if not href:
@@ -961,7 +1016,7 @@ class HDXConverter:
                 dc_identifier=target_info.get('dc_identifier', '') if target_info else '',
                 html_filename=target_info.get('target', '') if target_info else '',
                 html_path=href,
-                md_filename=target_info.get('md_filename', '') if target_info else ''
+                json_filename=target_info.get('json_filename', '') if target_info else ''
             ))
 
         if normalized_links:
@@ -1015,16 +1070,36 @@ class HDXConverter:
         """Извлечение структуры разделов ИЗ STRUCTURED_DATA"""
         sections = []
 
+        # Все типы секций, которые должны быть в структуре документа
+        section_types = ['section', 'steps', 'example', 'postrequisite', 'prerequisite',
+                         'result', 'impact', 'cause', 'admonition', 'log_message']
+
+        # Типы секций, для которых заголовок не обязателен
+        no_title_required = ['section', 'admonition', 'log_message']
+
+        # Заголовки по умолчанию для секций без заголовка
+        default_titles = {
+            'section': 'Content',
+            'admonition': 'Note',
+            'log_message': 'Log Message'
+        }
+
         for i, content_item in enumerate(structured_data.get("content", [])):
-            if content_item.get("type") == "section":
+            if content_item.get("type") in section_types:
                 section_id = f"section_{i+1}"
                 title = content_item.get("title", "")
+                section_type = content_item.get("type")
+
+                # Если заголовок пустой, но для этого типа допускается пустой заголовок,
+                # используем заголовок по умолчанию
+                if not title and section_type in no_title_required:
+                    title = default_titles.get(section_type, section_type.capitalize())
 
                 if title and title != "Навигация":  # Пропускаем навигационную секцию
                     sections.append({
                         "section_id": section_id,
                         "title": title,
-                        "type": "content"  # Можно уточнить логику определения типа
+                        "type": section_type
                     })
 
         self.logger.debug(f"Извлечено секций из structured_data: {len(sections)}")

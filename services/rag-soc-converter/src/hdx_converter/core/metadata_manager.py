@@ -83,27 +83,28 @@ class MetadataManager:
             )
 
         # Создание связей с правильными типами
+        # ИСПРАВЛЕНИЕ: Обновляем RelatedArticle для версии 1.3 (json_filename вместо md_filename)
         relations = Relations(
             parent_article=RelatedArticle(
                 title="",
                 dc_identifier="",
                 html_filename="",
                 html_path="",
-                md_filename=""
+                json_filename=""
             ),
             previous_article=RelatedArticle(
                 title="",
                 dc_identifier="",
                 html_filename="",
                 html_path="",
-                md_filename=""
+                json_filename=""
             ),
             next_article=RelatedArticle(
                 title="",
                 dc_identifier="",
                 html_filename="",
                 html_path="",
-                md_filename=""
+                json_filename=""
             ),
             internal_links=[],
             external_links=[]
@@ -111,11 +112,12 @@ class MetadataManager:
 
         # Создание метаданных статьи
         metadata = ArticleMetadata(
-            metadata_version="1.2",
+            metadata_version="1.3",
             source=source_info,
             article={
                 "title": title,
-                "md_filename": md_filename,
+                "json_filename": f"{safe_title}_{dc_identifier}.json",
+                "md_filename": md_filename,  # Оставляем для обратной совместимости при генерации MD
                 "dc_identifier": dc_identifier,
                 "document_type": html_metadata.get("document_type", ""),
                 "language": html_metadata.get("language", ""),
@@ -174,5 +176,9 @@ class MetadataManager:
         metadata.technical_metadata.content_flags = ContentFlags(**content_flags)
     
     def update_section_structure(self, metadata: ArticleMetadata, section_structure: List[Dict]):
-        """Обновление структуры секций в метаданных"""
+        """Обновление структуры секций в метаданных
+
+        Принимает секции любых типов: section, steps, example, postrequisite,
+        prerequisite, result, impact, cause, admonition, log_message
+        """
         metadata.article["section_structure"] = section_structure
