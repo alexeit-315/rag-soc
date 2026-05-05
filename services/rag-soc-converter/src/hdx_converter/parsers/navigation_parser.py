@@ -38,7 +38,7 @@ class NavigationParser:
                 "title": "Orphan Article",
                 "dc_identifier": "ORPHAN_ARTICLE",
                 "html_filename": "",
-                "md_filename": ""
+                "json_filename": ""
             }]
 
         # Собираем иерархию родителей
@@ -52,13 +52,17 @@ class NavigationParser:
                 "title": "Orphan Article",
                 "dc_identifier": "ORPHAN_ARTICLE",
                 "html_filename": "",
-                "md_filename": ""
+                "json_filename": ""
             }]
 
         # Фильтруем текущую статью из иерархии
         filtered_hierarchy = []
         for item in hierarchy:
             if item.get('dc_identifier') != current_article.get('dc_identifier'):
+                # Преобразуем старый формат в новый, если нужно
+                if 'md_filename' in item and 'json_filename' not in item:
+                    safe_title = self._sanitize_filename(item.get('title', ''))
+                    item['json_filename'] = f"{safe_title}_{item.get('dc_identifier', '')}.json"
                 filtered_hierarchy.append(item)
 
         return filtered_hierarchy
@@ -121,13 +125,16 @@ class NavigationParser:
         
         # Генерация имен файлов (упрощенная версия)
         html_filename = html_file.name
-        md_filename = f"{self._sanitize_filename(title)}_{dc_identifier}.md"
+        safe_title = self._sanitize_filename(title)
+        md_filename = f"{safe_title}_{dc_identifier}.md"
+        json_filename = f"{safe_title}_{dc_identifier}.json"
         
         return {
             "title": title,
             "dc_identifier": dc_identifier,
             "html_filename": html_filename,
-            "md_filename": md_filename
+            "md_filename": md_filename,
+            "json_filename": json_filename
         }
     
     def _sanitize_filename(self, filename: str) -> str:

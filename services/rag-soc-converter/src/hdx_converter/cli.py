@@ -13,9 +13,9 @@ from hdx_converter.api import create_app
 try:
     from hdx_converter import __version__, __author__, __year__
 except ImportError:
-    __version__ = "1.5.1"
+    __version__ = "1.5.2"
     __author__ = "HDX Converter Team"
-    __year__ = "03.2026"
+    __year__ = "04.2026"
 
 
 def main():
@@ -71,6 +71,16 @@ Examples:
     parser.add_argument('--no-stats', action='store_true',
                        help='Skip statistics collection and display')
 
+    # Настройки глобальных метаданных
+    parser.add_argument('--product-series', type=str, default=None,
+                        help='Product series (e.g., USG6000F)')
+    parser.add_argument('--compatible-models', type=str, default=None,
+                        help='Comma-separated list of compatible models (e.g., USG6000F,USG6000E)')
+    parser.add_argument('--firmware-version', type=str, default=None,
+                        help='Firmware version (e.g., V600R024C10)')
+    parser.add_argument('--skip-metadata-confirmation', action='store_true',
+                        help='Skip interactive metadata confirmation')
+
     args = parser.parse_args()
 
     # Определение verbose_level
@@ -114,6 +124,11 @@ Examples:
         log_level="DEBUG"
     )
 
+    # Обработка compatible_models (из строки в список)
+    compatible_models_list = None
+    if args.compatible_models:
+        compatible_models_list = [m.strip() for m in args.compatible_models.split(',')]
+
     # Вывод версии в консоль
     version_msg = f"HDX Converter v.{__version__} {__year__} - {__author__}"
     print(version_msg)
@@ -124,7 +139,15 @@ Examples:
         logger = HDXLogger(config, verbose_level).get_logger()
         logger.info(version_msg)
 
-        converter = HDXConverter(config, logger)
+        converter = HDXConverter(
+            config,
+            logger,
+            product_series=args.product_series,
+            compatible_models=compatible_models_list,
+            firmware_version=args.firmware_version,
+            skip_metadata_confirmation=args.skip_metadata_confirmation
+        )
+
         converter.convert(args.hdx_file)
 
         # Проверка наличия ошибок для кода возврата

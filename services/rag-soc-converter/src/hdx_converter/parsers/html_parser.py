@@ -1,3 +1,5 @@
+# parsers/html_parser.py - ПОЛНЫЙ ФАЙЛ С ИЗМЕНЕНИЯМИ
+
 from bs4 import BeautifulSoup
 import re
 from pathlib import Path
@@ -126,18 +128,40 @@ class HTMLParser:
         """Определение типа раздела"""
         class_attr = element.get('class', [])
         if isinstance(class_attr, list):
-            class_attr = ' '.join(class_attr)
+            class_attr_str = ' '.join(class_attr)
+        else:
+            class_attr_str = class_attr if isinstance(class_attr, str) else ""
 
-        if 'clifunc' in class_attr:
+        if 'clifunc' in class_attr_str:
             return SectionType.FUNCTION
-        elif 'cliformat' in class_attr:
+        elif 'cliformat' in class_attr_str:
             return SectionType.FORMAT
-        elif 'cliparam' in class_attr:
+        elif 'cliparam' in class_attr_str:
             return SectionType.PARAMETERS
-        elif 'cliview' in class_attr:
+        elif 'cliview' in class_attr_str:
             return SectionType.VIEWS
-        elif 'example' in class_attr:
+        elif 'example' in class_attr_str:
             return SectionType.EXAMPLE
+        # === НОВОЕ: Добавление новых типов ===
+        elif 'steps' in class_attr_str:
+            return SectionType.STEPS
+        elif 'prereq' in class_attr_str:
+            return SectionType.PREREQUISITE
+        elif 'postreq' in class_attr_str:
+            return SectionType.POSTREQUISITE
+        elif 'result' in class_attr_str:
+            return SectionType.RESULT
+        elif 'impactonsystem' in class_attr_str:
+            return SectionType.IMPACT
+        elif 'possiblecauses' in class_attr_str:
+            return SectionType.CAUSE
+        elif 'note' in class_attr_str or 'caution' in class_attr_str or 'danger' in class_attr_str or 'warning' in class_attr_str:
+            return SectionType.ADMONITION
+        elif 'logRef' in class_attr_str:
+            return SectionType.LOG_MESSAGE
+        elif 'fignone' in class_attr_str:
+            return SectionType.FIGURE
+        # === КОНЕЦ НОВОГО ===
         else:
             return SectionType.CONTENT
 
